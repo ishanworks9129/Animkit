@@ -1,0 +1,5 @@
+Drop a Windows ffmpeg binary here, named "ffmpeg.exe". See ../README.md.
+
+The binary is not tracked in git -- it is ~217 MB, past GitHub's 100 MB
+per-file limit. Nothing here is required; animkit falls back to the
+`reference.ffmpeg` setting, then to whatever ffmpeg is on PATH.
