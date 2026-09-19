@@ -109,11 +109,53 @@ line and use [userSetup_example.py](userSetup_example.py) instead.
 To hand a build to someone outside the repo, run
 [scripts/make_release.ps1](scripts/make_release.ps1). It stages only what a
 tester needs, refuses to zip a package with a personal path or a stray `.pyc`
-in it, and leaves the GPL ffmpeg binary out unless you ask for it.
+in it, and verifies the bundled ffmpeg is an LGPL build before it will
+ship one.
 
 For a studio, put the repo on a network share and put one `.mod` in a path on
 `MAYA_MODULE_PATH`. That is the entire deployment story for a pure-Python
 tool — no installer, no licence server, `git pull` to update.
+
+## Opening it at startup
+
+animkit opens nothing on its own *except* at the moment it is installed, and
+that exception is the point rather than a hole in the rule. House rule 6
+applied to screen space says a tool must not put itself in the layout of every
+animator who installs it — but somebody who has just dragged an installer into
+their viewport has asked for the tool, and an installer that ends with a dialog
+and no visible tool has told them something happened somewhere and left them to
+find it. So DRAG_AND_DROP_INSTALL.py opens the strip, sets
+`ui.open_at_startup` to "strip", and **says both in the dialog**. A preference
+somebody has to discover was changed for them is the surprise the rule is
+actually about; one that is announced as it happens, with the line to undo it,
+is not.
+
+Two mechanisms, and they answer different questions.
+
+**Maya's own restore** handles "it was open when I quit". Every panel here is
+a `workspaceControl`, Maya writes the retained ones into the saved workspace,
+and recreates them at launch by running `uiScript` -- which is why every
+`build()` in [animkit/ui/](animkit/ui/) is documented as cold-interpreter safe
+and calls `animkit.startup()` itself before touching anything. That path was
+dead until recently: `mayawin.show_workspace_control` passed `retain=False`,
+so a closed control was dropped rather than saved, and the restore it was all
+written for could never fire.
+
+**`ui.open_at_startup`** handles "it should be there every morning whether or
+not I left it open". Empty by default; `"strip"`, `"panel"` or `"both"` open
+one or both. It is read by `animkit.open_startup_ui()`, which
+[startup/userSetup.py](startup/userSetup.py) calls immediately after
+`startup()` inside the same deferred call -- one call, so a panel cannot be
+built before the `runTimeCommand`s its buttons carry have been registered.
+
+`open_startup_ui()` is deliberately **not** part of `startup()`. That function
+runs from userSetup.py where Maya's UI does not reliably exist yet, and the
+rule that it touches no Qt is the whole reason animkit cannot break a Maya
+launch. Splitting the UI open into a separate call is what lets the tool open
+a panel at startup without giving up that guarantee. It also imports no UI
+module at all when the setting is empty, which is the common case -- dragging
+Qt into every Maya launch to then open nothing would slow down every
+animator's startup for nobody.
 
 ## Finding out what testers actually used
 
@@ -931,19 +973,30 @@ dropped video work with no setup at all. It is looked up as: the
 to handing the movie to Maya exactly as before and says so, and images and
 image sequences are unaffected.
 
-Two things worth knowing before shipping this on:
+The bundled Windows build is **LGPL v3** — `n8.1.2-54-gc573a95381`, from
+[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), configured
+`--enable-version3` with no `--enable-gpl`. It replaced a 217 MB GPL v3 build,
+and the swap was worth making for one reason: a GPL binary obliges everyone who
+passes animkit on to offer ffmpeg's corresponding source to every recipient,
+which turns handing an evaluation copy to a studio into a compliance exercise.
 
-- the bundled Windows build is **GPL v3** (`--enable-gpl --enable-version3`),
-  so redistributing it carries the GPL's obligations. Invoking it as a separate
-  program over a subprocess is aggregation rather than linking, so animkit
-  itself is not affected — but the binary comes with strings;
-- **an LGPL build is the better choice and is a drop-in replacement.** animkit
-  only decodes video and writes jpg/png, so it needs no GPL-only encoder. It is
-  also much smaller than the 217MB static build bundled here.
+It costs nothing, because **animkit only ever decodes**. The GPL parts of
+ffmpeg are encoders — `libx264`, `libx265` — and animkit writes MJPEG and PNG,
+both native. This build has the GPL-only libraries explicitly disabled, which
+is what `make_release.ps1` checks for: it runs `ffmpeg -version` on whatever is
+in the slot and **refuses to build a package** if it finds `--enable-gpl`. A
+licence problem that leaves the building inside a zip is one nobody notices
+until it matters.
 
-That folder's README has the swap instructions, and `tests/test_transcode.py`
-runs real conversions against whatever binary is present — so it says
-immediately whether a replacement can do the job.
+Passing the LGPL binary on still requires shipping the licence text and being
+able to point at the corresponding source. Both are recorded in
+[animkit/vendor/ffmpeg/README.md](animkit/vendor/ffmpeg/README.md), along with
+the swap instructions — and `tests/test_transcode.py` runs 32 real conversions
+against whatever binary is present, so it says immediately whether a
+replacement can do the job.
+
+It is still 126 MB against ~500 KB of Python, and `make_release.ps1 -NoFFmpeg`
+leaves it out for a pipeline that would rather supply its own.
 
 ### Time is one subtraction
 
@@ -1836,10 +1889,12 @@ Phases 1, 3 and 4 are in, plus reference media.
    plan. Nothing has been profiled yet, so nothing here is decided.
 2. Smaller, if it earns its place: the radial currently draws labels only. Icons
    would help the `pose` menu, where five of eight labels are verbs.
-3. Swap the bundled GPL ffmpeg for an **LGPL** build — smaller, and simpler
-   to redistribute. animkit uses no GPL-only encoder, so it is a drop-in;
-   see [animkit/vendor/ffmpeg/README.md](animkit/vendor/ffmpeg/README.md).
-   Slots for macOS and Linux binaries are there and empty.
+3. macOS and Linux ffmpeg binaries. The slots in
+   [animkit/vendor/ffmpeg/](animkit/vendor/ffmpeg/) are there and empty, and
+   the lookup already finds whatever is dropped in. The Windows build is an
+   LGPL one as of this release, so the licence question is settled; what is
+   left is finding builds and running `tests/test_transcode.py` against them
+   on those platforms.
 4. Reference, if animators ask for it: a corner placement so the video sits in
    the corner of the frame rather than filling it, and a model panel created
    *after* `install()` picking up the drop filter on its own. Neither is a gap

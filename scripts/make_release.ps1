@@ -16,20 +16,22 @@
                         worse than useless on a different Maya version
       .git, .gitignore
 
-    The bundled ffmpeg binary is EXCLUDED by default and this is not just
-    about the 217 MB. The bundled Windows build is GPL v3, so handing it to
-    somebody else brings the GPL's obligations with it -- including making
-    ffmpeg's corresponding source available to them. Options, best first:
+    The bundled ffmpeg binary IS SHIPPED by default. It is 126 MB and it
+    takes the zip from under a megabyte to about 53 MB, which is a real cost
+    and still the right default: Maya cannot decode .mp4 or .mov on an image
+    plane at all, so without the converter a dropped video makes a blank
+    plane, and "the reference feature is broken" is what gets reported.
 
-      1. Drop an LGPL build into animkit/vendor/ffmpeg/win64/ and ship that
-         (-IncludeFFmpeg). animkit only ever decodes video and writes
-         jpg/png, so an LGPL "shared" build does everything needed and is far
-         smaller. See animkit/vendor/ffmpeg/README.md.
-      2. Ship without it (the default). Everything works except decoding
-         .mp4/.mov for reference, which falls back to whatever ffmpeg is on
-         PATH, or to handing the movie straight to Maya.
-      3. Ship the GPL build knowingly (-IncludeFFmpeg) and meet the
-         obligation. The LICENSE file travels with it either way.
+    This is only the right default because the bundled build is LGPL v3 --
+    see animkit/vendor/ffmpeg/README.md, which records the exact version and
+    the source pointer that redistributing it obliges you to provide. A GPL
+    build in that slot would bring much heavier obligations; check
+    `ffmpeg -version` for --enable-gpl before swapping one in.
+
+    -NoFFmpeg leaves it out. The package drops under a megabyte, the tester
+    keeps photo and image-sequence reference, and loses video and mp3 until
+    they put an ffmpeg on PATH. The installer detects which case they are in
+    and tells them at install time. The LICENSE travels either way.
 
     -Recipient stamps the package with who it was cut for, by rewriting
     animkit/_build.py in the staged copy. Cut one zip per recipient and a
@@ -39,14 +41,17 @@
     nothing running on their machine.
 
 .EXAMPLE
-    .\scripts\make_release.ps1
     .\scripts\make_release.ps1 -Recipient "animbot"
-    .\scripts\make_release.ps1 -Recipient "studio-x" -IncludeFFmpeg
+    .\scripts\make_release.ps1 -Recipient "studio-x" -NoFFmpeg
     .\scripts\make_release.ps1 -IncludeDocs -Version 0.1.0-eval
 #>
 param(
     [string]$Recipient,
     [string]$Version,
+    [switch]$NoFFmpeg,
+    # Accepted and ignored. ffmpeg ships by default now that the bundled
+    # build is LGPL; this is kept so a command written down earlier, or a
+    # habit, does not fail with a parameter error.
     [switch]$IncludeFFmpeg,
     [switch]$IncludeDocs,
     [string]$OutputDir
@@ -110,25 +115,54 @@ Get-ChildItem $stage -Recurse -Force -Include "*.pyc", "*.pyo" |
 $ffmpegDir = Join-Path $stage "animkit\vendor\ffmpeg"
 $binaries  = @("win64\ffmpeg.exe", "macos\ffmpeg", "linux\ffmpeg")
 
-if ($IncludeFFmpeg) {
-    $shipped = $binaries | Where-Object { Test-Path (Join-Path $ffmpegDir $_) }
-    if ($shipped) {
-        foreach ($one in $shipped) {
-            $size = [math]::Round((Get-Item (Join-Path $ffmpegDir $one)).Length / 1MB)
-            Write-Host "  ffmpeg: shipping $one ($size MB)" -ForegroundColor Yellow
-        }
-        Write-Host "  ffmpeg: CHECK THE LICENCE of the build you are shipping." -ForegroundColor Yellow
-        Write-Host "          A GPL v3 build obliges you to offer its source to" -ForegroundColor Yellow
-        Write-Host "          whoever you hand this to. See vendor/ffmpeg/README.md." -ForegroundColor Yellow
-    } else {
-        Write-Host "  ffmpeg: -IncludeFFmpeg passed but no binary is present" -ForegroundColor Yellow
-    }
-} else {
+# Anything left over from a previous build: a .bak of a replaced binary is
+# 217 MB of nothing anybody needs in a hand-off package.
+Get-ChildItem $ffmpegDir -Recurse -File -Include "*.bak" |
+    ForEach-Object { Remove-Item $_.FullName -Force }
+
+if ($NoFFmpeg) {
     foreach ($one in $binaries) {
         $path = Join-Path $ffmpegDir $one
         if (Test-Path $path) { Remove-Item $path -Force }
     }
-    Write-Host "  ffmpeg: excluded (licence + size). Video reference falls back to PATH."
+    Write-Host "  ffmpeg: EXCLUDED (-NoFFmpeg)." -ForegroundColor Yellow
+    Write-Host "          The tester gets no video and no mp3 reference until they" -ForegroundColor Yellow
+    Write-Host "          supply one. Photos and image sequences are unaffected," -ForegroundColor Yellow
+    Write-Host "          README_FIRST.md explains it, and the installer says so" -ForegroundColor Yellow
+    Write-Host "          at install time." -ForegroundColor Yellow
+} else {
+    $shipped = $binaries | Where-Object { Test-Path (Join-Path $ffmpegDir $_) }
+    if (-not $shipped) {
+        Write-Error ("No ffmpeg binary in $ffmpegDir. Put one there (see its " +
+                     "README.md), or pass -NoFFmpeg to ship without it " +
+                     "deliberately rather than by accident.")
+    }
+
+    foreach ($one in $shipped) {
+        $binary = Join-Path $ffmpegDir $one
+        $size = [math]::Round((Get-Item $binary).Length / 1MB)
+        Write-Host "  ffmpeg: shipping $one ($size MB)"
+
+        # The licence is the whole reason this is the default rather than
+        # opt-in, so it is verified rather than assumed. A GPL build slipped
+        # into the slot is a compliance problem that would otherwise leave
+        # here inside a zip.
+        $config = & $binary -hide_banner -version 2>&1 | Out-String
+        if ($config -match '--enable-gpl') {
+            Write-Error ("$one is a GPL build (--enable-gpl). Shipping it " +
+                         "obliges you to offer ffmpeg's corresponding source " +
+                         "to every recipient. Swap in an LGPL build -- see " +
+                         "animkit/vendor/ffmpeg/README.md -- or pass -NoFFmpeg.")
+        }
+        if ($config -match 'ffmpeg version (\S+)') {
+            Write-Host "          $($Matches[1]), LGPL (no --enable-gpl)"
+        }
+
+        # A "PUT FFMPEG HERE" note sitting beside an ffmpeg reads as a job
+        # somebody forgot to finish. The empty platform slots keep theirs.
+        $note = Join-Path (Split-Path (Join-Path $ffmpegDir $one) -Parent) "PUT_FFMPEG_HERE.txt"
+        if (Test-Path $note) { Remove-Item $note -Force }
+    }
 }
 
 # --- build identity --------------------------------------------------------

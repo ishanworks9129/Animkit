@@ -62,13 +62,41 @@ SHELF_BUTTONS = (
 #: Folder names that get emptied, and so make a bad install location.
 VOLATILE = ("temp", "tmp", "downloads", "recycle")
 
+#: Every workspaceControl animkit can create.
+#:
+#: Hardcoded rather than read from the package, because uninstall has to work
+#: at the exact moment the package is unreachable -- that is rather the point
+#: of it. tests/test_install.py greps CONTROL_NAME out of every animkit/ui
+#: module and asserts this list covers them, so it cannot drift quietly.
+#:
+#: Removing these is not optional tidying. A workspaceControl is retained in
+#: Maya's saved workspace and rebuilt at the next launch by running its
+#: uiScript -- "import animkit.ui.strip as m; m.build()" -- so an uninstall
+#: that leaves them behind leaves a Maya that reaches for a deleted module
+#: every time it starts.
+CONTROLS = (
+    "animkitStrip",
+    "animkitPanel",
+    "animkitHelp",
+    "animkitTweenPanel",
+    "animkitKeysPanel",
+    "animkitSetsPanel",
+    "animkitRefPanel",
+)
+
 
 # ---------------------------------------------------------------------------
 # Finding ourselves
 #
-# Maya executes a dropped .py file and then calls onMayaDroppedPyFile(). What
-# it does NOT reliably do across 2022-2026 is define __file__ while doing it,
-# so there are three answers to "where am I" here and the last one asks.
+# Maya does not exec a dropped .py file -- it importlib.import_module()s it and
+# then calls onMayaDroppedPythonFile() on the result, so on the drop path
+# __file__ is set by the import machinery and the first answer below is the
+# one that fires.
+#
+# The other two are for the paths that are not a drop: pasted into the Script
+# Editor, run from a shelf button, called by a studio's own setup script. They
+# cost nothing and they are the difference between "it says where to point it"
+# and a traceback.
 # ---------------------------------------------------------------------------
 
 def _this_file():
@@ -246,6 +274,97 @@ def _remove_shelf():
 # Install / uninstall
 # ---------------------------------------------------------------------------
 
+def _media_note():
+    """What dropping a video will actually do on THIS machine.
+
+    Asked at install time on purpose. animkit converts a dropped video to an
+    image sequence before Maya sees it, because Maya cannot decode .mp4 or
+    .mov on an image plane at all -- so with no ffmpeg the plane is created,
+    a warning is printed, and nothing draws. That is a perfectly clear
+    failure to somebody who read the README and a baffling one to everybody
+    else, and "the reference feature is broken" is what gets reported.
+
+    Photos and image sequences never need ffmpeg and are unaffected.
+    """
+    try:
+        from animkit.core import settings, transcode
+
+        if transcode.is_available(settings.get("reference.ffmpeg") or None):
+            return "Video, image and audio reference: all working."
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return ""
+
+    return (
+        "Photo and image-sequence reference: working.\n"
+        "VIDEO and MP3 reference: NOT working on this machine -- no ffmpeg.\n"
+        "  Maya cannot decode .mp4 or .mov on an image plane, so animkit\n"
+        "  converts first, and this build ships without the converter.\n"
+        "  Drop any ffmpeg into animkit/vendor/ffmpeg/win64/ffmpeg.exe, or\n"
+        "  put one on PATH, and it is picked up with no other change."
+    )
+
+
+def _open_strip():
+    """Open the strip and ask for it back on every launch. Never raises.
+
+    THIS IS NOT THE SAME AS animkit OPENING ITSELF UNINVITED.
+    animkit's rule is that it puts nothing on screen and nothing on a hotkey
+    that the animator did not ask for, and this does not break it: somebody
+    dragged an installer into their viewport thirty seconds ago. Showing them
+    the thing they just installed IS the invitation being honoured. An
+    installer that ends with a dialog and no visible tool has told the
+    animator that something happened somewhere, and left them to find it.
+
+    The startup setting is written here for the same reason and is stated in
+    the dialog rather than done quietly -- a preference somebody has to
+    discover was changed for them is exactly the kind of surprise the rule is
+    about. One line in the Script Editor puts it back.
+
+    Returns what the install dialog should say about it.
+    """
+    try:
+        from animkit.core import settings
+        import animkit.ui.strip as strip
+
+        strip.show()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return ("The strip could not be opened -- see the Script Editor.\n"
+                'Open it from the "strip" button on the shelf.')
+
+    # Arm the viewport for dropped media in THIS session too, not just from
+    # the next launch. Otherwise the first thing a tester tries -- dragging a
+    # video onto the viewport, because the README says to -- falls through to
+    # Maya and reports "No translator found".
+    #
+    # ITS OWN try, deliberately. Sharing one with the strip above meant a
+    # failure here reported "The strip could not be opened" over a strip that
+    # was open and fine, which is a worse bug than the one it was hiding:
+    # a misleading diagnosis costs more than a missing feature.
+    try:
+        import animkit
+
+        animkit.install_viewport_drop()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+    try:
+        settings.set("ui.open_at_startup", "strip")
+        return ("The strip is open, docked above the time slider, and set to\n"
+                "open with Maya from now on. To stop that:\n"
+                '    from animkit.core import settings\n'
+                '    settings.set("ui.open_at_startup", "")')
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return ("The strip is open, docked above the time slider. It could\n"
+                "not be set to open with Maya -- see the Script Editor.")
+
+
 def _maya_version():
     from maya import cmds
     try:
@@ -367,34 +486,188 @@ def install(root=None):
                       "Editor. Everything else installed fine; open the panel\n"
                       "with:  import animkit.ui.panel as m; m.show()")
 
+    media = _media_note()
+    strip_note = _open_strip()
+
     print("animkit %s installed" % VERSION)
     print("  module file : %s" % mod)
     print("  code        : %s" % root)
+    if media:
+        print("  %s" % media.replace("\n", "\n  "))
 
     _dialog(
         "animkit installed",
         "animkit %s is installed and running in this session.\n\n"
-        "%s\n\n"
+        "%s\n%s\n\n"
         "Code   : %s\n"
         "Module : %s\n\n"
-        "Start with the panel button -- or the self-test button first. It\n"
-        "creates and deletes its own temporary nodes, touches nothing you\n"
-        "selected, and prints a PASS/FAIL table. Run it twice; the two runs\n"
-        "should match.\n\n"
+        "%s\n\n"
+        "Try the self-test button on the shelf first. It creates and deletes\n"
+        "its own temporary nodes, touches nothing you selected, and prints a\n"
+        "PASS/FAIL table. Run it twice; the two runs should match.\n\n"
         "Nothing else on this machine was touched." % (
-            VERSION, shelf_note, root, mod),
+            VERSION, shelf_note, strip_note, root, mod, media),
         ["OK"])
     return True
 
 
-def uninstall():
+def _prefs_dir():
+    from maya import cmds
+    return os.path.join(cmds.internalVar(userPrefDir=True), "animkit")
+
+
+def _remove_controls():
+    """Delete every animkit panel AND Maya's saved state for it.
+
+    deleteUI alone is not enough: Maya persists a workspaceControl's
+    definition, uiScript included, in the workspace, and reuses it when a
+    control of that name next appears. The state is purged even for a control
+    that does not currently exist, because the state is exactly the thing
+    that outlives the control.
+    """
     from maya import cmds
 
     removed = []
+    for name in CONTROLS:
+        try:
+            if cmds.workspaceControl(name, q=True, exists=True):
+                cmds.deleteUI(name)
+                removed.append(name)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        try:
+            cmds.workspaceControlState(name, remove=True)
+        except Exception:
+            # No saved state, or a Maya that will not be queried about it.
+            # Either way there is nothing here worth a traceback.
+            pass
+    return removed
+
+
+#: The category animkit registers its runTimeCommands under.
+COMMAND_CATEGORY = "Custom Scripts.animkit"
+
+
+def _remove_runtime_commands():
+    """Delete animkit's runTimeCommands. Deliberately does not import animkit.
+
+    These are NOT session-scoped, which is the thing that makes this worth
+    doing properly. They are registered with `default=False`, so Maya writes
+    every one of them into prefs/userRunTimeCommands.mel when it exits -- on
+    this machine that is 236 lines. Leave them and they come back in the next
+    Maya forever, listed in the Hotkey Editor under a category whose commands
+    all raise ImportError because the package they name is gone.
+
+    Scanning for them beats calling animkit.commands.unregister(), because
+    the case that needs cleaning most is the one where animkit can no longer
+    be imported at all -- a deleted folder, a .mod removed by hand. Matching
+    on the category first and the name prefix second finds them either way.
+    """
+    from maya import cmds
+
+    try:
+        names = cmds.runTimeCommand(q=True, userCommandArray=True) or []
+    except Exception:
+        return []
+
+    removed = []
+    for name in names:
+        try:
+            category = cmds.runTimeCommand(name, q=True, category=True) or ""
+        except Exception:
+            category = ""
+        if category != COMMAND_CATEGORY and not name.startswith("animkit"):
+            continue
+        try:
+            if cmds.runTimeCommand(name, q=True, exists=True):
+                cmds.runTimeCommand(name, e=True, delete=True)
+                removed.append(name)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+    return removed
+
+
+def _remove_option_vars():
+    """Delete animkit's optionVars -- the saved panel geometry.
+
+    Maya writes these into prefs/userPrefs.mel: animkitPanelState,
+    animkitTweenControlState and friends. Harmless, invisible, and they
+    outlive everything else, so an "uninstall" that leaves them has not
+    quite told the truth.
+    """
+    from maya import cmds
+
+    try:
+        names = cmds.optionVar(q=True, list=True) or []
+    except Exception:
+        return []
+
+    removed = []
+    for name in names:
+        if not name.startswith("animkit"):
+            continue
+        try:
+            cmds.optionVar(remove=name)
+            removed.append(name)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+    return removed
+
+
+def _remove_prefs():
+    import shutil
+
+    folder = _prefs_dir()
+    if not os.path.isdir(folder):
+        return False
+    shutil.rmtree(folder)
+    return True
+
+
+def uninstall(purge=None):
+    """Remove animkit. `purge` also deletes settings and the usage log.
+
+    purge=None asks, which is the drag-and-drop path. Pass True or False to
+    script it.
+
+    The log is a separate question from the install because it is the
+    tester's own data and the thing they were going to send back -- deleting
+    it as a side effect of "uninstall" would throw away the only record of
+    what they found.
+    """
+    removed = []
+
+    if purge is None and os.path.isdir(_prefs_dir()):
+        answer = _dialog(
+            "animkit",
+            "Remove animkit's settings and usage log as well?\n\n    %s\n\n"
+            "Keep them and a later reinstall picks up where this left off --\n"
+            "including anything you were going to send back.\n\n"
+            "Remove everything for a genuinely clean slate, which is what you\n"
+            "want if you are about to test the install again." % _prefs_dir(),
+            ["Keep them", "Remove everything", "Cancel"], "Keep them")
+        if answer == "Cancel":
+            return False
+        purge = answer == "Remove everything"
+
     path = _mod_path()
     if os.path.isfile(path):
         os.remove(path)
         removed.append(path)
+
+    # Before the shelf, so a half-failed uninstall still takes the panels --
+    # they are the part that follows Maya into the next session.
+    try:
+        controls = _remove_controls()
+        if controls:
+            removed.append("%d panel(s): %s" % (len(controls), ", ".join(controls)))
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
     try:
         if _remove_shelf():
             removed.append("the animkit shelf")
@@ -402,21 +675,52 @@ def uninstall():
         import traceback
         traceback.print_exc()
 
+    try:
+        commands = _remove_runtime_commands()
+        if commands:
+            removed.append("%d runTimeCommand(s)" % len(commands))
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+    try:
+        option_vars = _remove_option_vars()
+        if option_vars:
+            removed.append("%d saved panel position(s)" % len(option_vars))
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+    if purge:
+        try:
+            if _remove_prefs():
+                removed.append("settings and the usage log")
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
     if removed:
-        print("animkit uninstalled: %s" % ", ".join(removed))
+        print("animkit uninstalled:")
+        for item in removed:
+            print("  removed  %s" % item)
         detail = "\n".join("  removed  %s" % item for item in removed)
     else:
         print("animkit: nothing to uninstall")
         detail = "  nothing was installed"
 
+    kept = ""
+    if not purge and os.path.isdir(_prefs_dir()):
+        kept = "\n\nKept, as asked:\n    %s" % _prefs_dir()
+
     _dialog(
         "animkit",
-        "animkit has been uninstalled.\n\n%s\n\n"
-        "Restart Maya to unload the code itself -- Maya holds imported\n"
-        "modules for the life of a session. The folder you installed from is\n"
-        "untouched; delete it when you are done.\n\n"
-        "Settings, if you changed any, remain in:\n    %s" % (
-            detail, os.path.join(cmds.internalVar(userPrefDir=True), "animkit")),
+        "animkit has been uninstalled.\n\n%s%s\n\n"
+        "RESTART MAYA before installing again. Maya holds imported modules\n"
+        "for the life of a session, so animkit's code is still loaded in this\n"
+        "one and a reinstall now would re-use it rather than reading the\n"
+        "folder afresh.\n\n"
+        "The folder you installed from is untouched; delete it when you are\n"
+        "done with it." % (detail, kept),
         ["OK"])
     return True
 
@@ -425,9 +729,36 @@ def uninstall():
 # Entry points
 # ---------------------------------------------------------------------------
 
-def onMayaDroppedPyFile(*args, **kwargs):
-    """Called by Maya when this file is dropped into a viewport."""
-    install()
+#: The name Maya looks for, and it is not negotiable or guessable. From
+#: maya/app/general/executeDroppedPythonFile.py:
+#:
+#:     MY_DROP_FUNC = 'onMayaDroppedPythonFile'
+#:     ...
+#:     if hasattr(loadedModule, MY_DROP_FUNC):
+#:         ret = loadedModule.onMayaDroppedPythonFile(obj)
+#:     else:
+#:         cmds.warning(... kDropFuncMissing ...)
+#:
+#: Get the name wrong and the drop does nothing except print that warning,
+#: which is what "onMayaDroppedPyFile" -- a name that reads fine and is not
+#: the one -- did here. tests/test_install.py now reads this constant out of
+#: the installed Maya rather than trusting either of us.
+DROP_FUNCTION = "onMayaDroppedPythonFile"
+
+
+def onMayaDroppedPythonFile(obj=None):
+    """Called by Maya when this file is dropped into a viewport.
+
+    Maya passes the object under the mouse, which animkit does not care
+    about, and uses the return value as the drop's success flag.
+
+    Note that Maya *imports* this file to find this function, so `__file__`
+    is set by importlib and the module stays in sys.modules afterwards. A
+    second drop therefore re-uses the loaded module and calls straight in
+    here without re-executing the file -- which is fine, because everything
+    above is definitions.
+    """
+    return install()
 
 
 if __name__ == "__main__":

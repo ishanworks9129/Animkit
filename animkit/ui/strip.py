@@ -42,23 +42,35 @@ BUILD_CODE = "import animkit.ui.strip as m; m.build()"
 #:
 #: Maya's main pane, Graph Editor and time slider are all workspaceControls,
 #: which is what lets a tool sit against them without reaching into Maya's own
-#: layout. `MainPane` is first because docking under it puts the strip directly
-#: beneath the viewport and ABOVE whatever else is stacked at the bottom --
-#: the Graph Editor included, which is the arrangement this was asked for.
+#: layout.
 #:
-#: The order after that is a fallback chain, not decoration.
+#: `TimeSlider` IS FIRST, AND THAT IS THE WHOLE POINT OF THIS TOOL.
+#: The strip exists because the time slider is what an animator is looking at
+#: while they work, so the bar has to be against it -- not merely somewhere in
+#: the lower half of the window. This list used to lead with
+#: ("MainPane", "bottom"), which docks under the viewport and therefore ABOVE
+#: everything else stacked at the bottom: with a Graph Editor open, or even
+#: collapsed to its title bar, the strip sat above that and the time slider was
+#: somewhere further down. Technically above the timeline. Not against it, and
+#: not what the tool is for.
+#:
+#: The rest is a fallback chain, not decoration. `TimeSlider` is always
+#: present, so in practice this list resolves on the first entry every time --
+#: the others are there so that a Maya which has renamed or removed it still
+#: docks somewhere sensible instead of opening floating.
 #: `graphEditor1Window` DOES NOT EXIST until the Graph Editor has been opened
 #: at least once, so a list naming only it would float on a fresh Maya and dock
-#: on a used one: one install behaving two ways for a reason invisible from the
-#: outside. `TimeSlider` is always present, so this list always resolves.
+#: on a used one: one install behaving two ways for a reason invisible from
+#: the outside.
 #:
 #: None of this overrides the animator. Maya remembers where a control was left
 #: and `show()` never re-docks an existing one, so dragging it somewhere else
-#: wins permanently -- this list only decides the FIRST launch.
+#: wins permanently -- this list only decides where it goes the FIRST time.
+#: `dock()` below is the way back if it ends up somewhere unwanted.
 DOCK_TARGETS = (
-    ("MainPane", "bottom"),
-    ("graphEditor1Window", "top"),
     ("TimeSlider", "top"),
+    ("graphEditor1Window", "top"),
+    ("MainPane", "bottom"),
 )
 
 #: Which registries appear, in order. THIS IS THE ONE PLACE the strip's
@@ -160,6 +172,28 @@ class Strip(QtWidgets.QWidget):
             log.exception("animkit: could not open the help panel")
 
 
+def content_height(bar, area):
+    """How tall the strip's scroll area needs to be, and no taller.
+
+    The row itself, plus room for the horizontal scrollbar. That room is
+    reserved whether or not the scrollbar is showing, because the strip
+    carries about fifty buttons and will need it at most dock widths -- and a
+    bar that changes height as the window is resized is worse than one with a
+    few pixels of slack.
+
+    Measured from the widget's own sizeHint rather than from a constant, so it
+    follows `style.px()` on a high-DPI display instead of being right on one
+    monitor and wrong on the next.
+    """
+    height = bar.sizeHint().height()
+    try:
+        height += area.horizontalScrollBar().sizeHint().height()
+    except Exception:
+        # No scrollbar to measure. A row with no slack beats no row.
+        log.debug("animkit: could not measure the scrollbar", exc_info=True)
+    return height
+
+
 def build():
     """Fill the current workspaceControl. Named by BUILD_CODE / uiScript.
 
@@ -182,7 +216,8 @@ def build():
         mayawin.clear_children(parent)
 
         area = QtWidgets.QScrollArea()
-        area.setWidget(Strip(area))
+        bar = Strip(area)
+        area.setWidget(bar)
         area.setWidgetResizable(True)
         area.setFrameShape(QtWidgets.QFrame.NoFrame)
         # A strip is one row. Vertical scrolling would mean the row does not
@@ -190,9 +225,15 @@ def build():
         # let the animator scroll around.
         area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        area.setFixedHeight(content_height(bar, area))
 
         parent.layout().setContentsMargins(0, 0, 0, 0)
         parent.layout().addWidget(area)
+        # Nothing may stretch below the bar. Without this the control keeps
+        # whatever height Maya gave it and the row floats in a slab of empty
+        # grey -- which is exactly what docking against the time slider, where
+        # Maya hands out a generous share of the space, produced.
+        parent.layout().addStretch(1)
 
         parent.setProperty(mayawin.BUILT_PROPERTY, True)
         return area
@@ -204,11 +245,25 @@ def build():
         return None
 
 
+#: Height to ask Maya for, before the widget inside measures itself properly.
+#:
+#: A starting allocation, not the answer: `build()` caps the scroll area from
+#: the row's real sizeHint once the buttons exist. This only has to be close
+#: enough that the control is not born as a slab, because Maya sizes it before
+#: any of that widget code has run.
+#:
+#: Derived from the metrics in style rather than typed as a number, so it
+#: tracks the button size if that ever changes: one button, the 2px the row
+#: layout puts above and below it, and room for a horizontal scrollbar.
+INITIAL_HEIGHT = style.ICON_BUTTON + 4 + 16
+
+
 def show():
-    """Open the strip, docked above the time slider the first time."""
+    """Open the strip, docked against the time slider the first time."""
     return mayawin.show_workspace_control(
         CONTROL_NAME, "animkit", BUILD_CODE,
-        width=style.px(900), dock_to=DOCK_TARGETS,
+        width=style.px(900), height=style.px(INITIAL_HEIGHT),
+        dock_to=DOCK_TARGETS,
     )
 
 

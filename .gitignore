@@ -9,7 +9,8 @@ __pycache__/
 # The Windows build is a ~217 MB static binary, well past GitHub's 100 MB
 # per-file limit, and nothing here is required: animkit falls back to the
 # `reference.ffmpeg` setting, then to whatever ffmpeg is on PATH.
-animkit/vendor/ffmpeg/win64/ffmpeg.exe
+animkit/vendor/ffmpeg/win64/ffmpeg*.exe
+animkit/vendor/ffmpeg/win64/*.bak
 animkit/vendor/ffmpeg/macos/ffmpeg
 animkit/vendor/ffmpeg/linux/ffmpeg
 

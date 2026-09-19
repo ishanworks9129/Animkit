@@ -132,6 +132,19 @@ DEFAULTS = {
     #: ships with animkit, else whatever is on PATH". For a studio that has
     #: standardised on its own build.
     "reference.ffmpeg": "",
+    #: Open a panel automatically when Maya starts. "" opens nothing, which
+    #: is the default -- a tool that plants itself in the layout of every
+    #: animator who installs it, uninvited, is a tool the lead uninstalls.
+    #:
+    #: "strip" is the one worth turning on: it docks above the time slider,
+    #: which is where an animator is already looking. "panel" opens the
+    #: dockable five-tab panel. "both" opens both.
+    #:
+    #: This is SEPARATE from Maya's own restore. Maya brings back whatever
+    #: workspaceControls were open when you quit; this opens one whether or
+    #: not it was open, which is what "it should just be there every morning"
+    #: actually means. Leave it empty and Maya's behaviour is unchanged.
+    "ui.open_at_startup": "",
     #: Append each operation to a local log -- see animkit.core.usage.
     #:
     #: On, and on deliberately, because the log NEVER LEAVES THE MACHINE. It

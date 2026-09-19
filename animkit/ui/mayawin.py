@@ -100,7 +100,7 @@ def is_built(control_name):
 
 
 def show_workspace_control(control_name, label, build_code, width=320,
-                           dock_to=None):
+                           height=None, dock_to=None):
     """Create, restore or raise a dockable panel.
 
     build_code is a Python one-liner that fills the current parent, e.g.
@@ -140,12 +140,41 @@ def show_workspace_control(control_name, label, build_code, width=320,
         )
         delete_workspace_control(control_name)
 
+    # RETAIN, so Maya brings it back next launch.
+    #
+    # A retained workspaceControl is written into the saved workspace, and
+    # Maya recreates it at startup by running `uiScript` -- which is the whole
+    # reason every build() in this package is documented as cold-interpreter
+    # safe and calls animkit.startup() itself. With retain off, that
+    # carefully-built restore path could never fire: the control was dropped
+    # on close and the next Maya came up empty, so a tool docked against the
+    # time slider had to be reopened from the shelf every single morning.
+    #
+    # The risk retain brings is the one this function already guards above: a
+    # control that is restored but whose uiScript failed, leaving an empty
+    # panel that every later show() politely restores. `is_built` catches it
+    # and rebuilds, so retaining costs nothing it does not already handle.
     kwargs = {
         "label": label,
-        "retain": False,
+        "retain": True,
         "initialWidth": width,
         "uiScript": build_code,
     }
+
+    # HEIGHT, FOR A CONTROL THAT IS ONE ROW TALL.
+    #
+    # Without this Maya hands a freshly docked control a share of whatever
+    # space its neighbour had, which for the strip docked above the time
+    # slider meant a bar of 40-pixel buttons sitting in a 300-pixel slab of
+    # empty grey. `heightProperty="fixed"` is the flag that actually stops it
+    # -- initialHeight alone only sets where the stretching starts from.
+    #
+    # The widget inside caps its own height as well, in strip.build(). Both
+    # are needed: this governs the control Maya allocates, that governs what
+    # the control does with the space if a Maya version ignores the flag.
+    if height:
+        kwargs["initialHeight"] = height
+        kwargs["heightProperty"] = "fixed"
 
     # DOCK AT CREATION, NOT AFTERWARDS.
     #
@@ -163,6 +192,23 @@ def show_workspace_control(control_name, label, build_code, width=320,
     try:
         cmds.workspaceControl(control_name, **kwargs)
     except Exception:
+        # Losing the height flags costs a badly-sized panel; losing the dock
+        # costs a floating one. So drop the height first and only give up the
+        # dock if that was not what Maya objected to.
+        if "heightProperty" in kwargs:
+            log.info(
+                "animkit: %s would not take the height flags -- creating it "
+                "without them. It may open taller than one row.",
+                control_name, exc_info=True,
+            )
+            kwargs.pop("heightProperty", None)
+            kwargs.pop("initialHeight", None)
+            try:
+                cmds.workspaceControl(control_name, **kwargs)
+                return _verified(control_name)
+            except Exception:
+                pass
+
         # An unusable dock target must not cost the animator the panel.
         log.info(
             "animkit: could not create %s docked to %r -- falling back to "
@@ -173,9 +219,16 @@ def show_workspace_control(control_name, label, build_code, width=320,
         kwargs["floating"] = True
         cmds.workspaceControl(control_name, **kwargs)
 
-    # The uiScript runs synchronously during creation, so a populated panel is
-    # verifiable right now. Say so plainly instead of handing back an empty
-    # window and a return value that looks like success.
+    return _verified(control_name)
+
+
+def _verified(control_name):
+    """Report an empty panel rather than returning a success-shaped value.
+
+    The uiScript runs synchronously during creation, so whether the panel
+    actually got populated is knowable right now. Saying so plainly beats
+    handing back a control name and an empty window.
+    """
     if not is_built(control_name):
         log.error(
             "animkit: %s was created but its uiScript did not populate it. "

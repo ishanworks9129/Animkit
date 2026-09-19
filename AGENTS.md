@@ -23,7 +23,7 @@ that surprised us once is now pinned by a test with a comment saying why.
 | Tests | **pytest**, run under `mayapy` | Not bundled with Maya; `scripts/run_tests.ps1` installs it `--user` on first run. |
 | Shell | **PowerShell** on Windows | `scripts/run_tests.ps1`. A Bash tool is also available in this environment. |
 | Runtime deps | **no Python packages**; one optional bundled binary | Stdlib + Maya only: `contextlib`, `functools`, `hashlib`, `json`, `logging`, `math`, `os`, `re`, `subprocess`, `time`, `traceback`. Do not add a third-party Python dependency — a studio install is a `.mod` file and a folder, and it has to stay that way. The exception is [animkit/vendor/ffmpeg/](animkit/vendor/ffmpeg/): a separate program run over a subprocess, optional at runtime, bundled because Maya cannot decode `.mp4` or `.mov` on an image plane. It is still just a folder. |
-| Packaging | **`.mod` file**, pure Python | [modules/animkit.mod](modules/animkit.mod). No compiled extension anywhere, which is what keeps one build serving every Maya version. [DRAG_AND_DROP_INSTALL.py](DRAG_AND_DROP_INSTALL.py) writes that `.mod` for a tester; [startup/userSetup.py](startup/userSetup.py) is what calls `startup()` at launch; [scripts/make_release.ps1](scripts/make_release.ps1) builds the hand-off zip and refuses to ship a personal path, a stray `.pyc` or the GPL ffmpeg binary. |
+| Packaging | **`.mod` file**, pure Python | [modules/animkit.mod](modules/animkit.mod). No compiled extension anywhere, which is what keeps one build serving every Maya version. [DRAG_AND_DROP_INSTALL.py](DRAG_AND_DROP_INSTALL.py) writes that `.mod` for a tester; [startup/userSetup.py](startup/userSetup.py) is what calls `startup()` at launch; [scripts/make_release.ps1](scripts/make_release.ps1) builds the hand-off zip and refuses to ship a personal path, a stray `.pyc`, or an ffmpeg built `--enable-gpl`. The bundled Windows binary is **LGPL v3** and ships by default; `-NoFFmpeg` opts out. |
 | VCS | **none — this is not a git repo** | Do not run `git` commands expecting history. There is no baseline to diff against; the test suite is the safety net. |
 
 The package is called `animkit`, **not** `animbot`, so it can be installed
@@ -51,7 +51,7 @@ started.
 | `rest_store.py` | Persists a captured rest pose in the scene. Identified by connection, never by name. |
 | `cache.py` | Scoped memoization. Read its docstring before extending it. |
 | `undo.py` | `undo_chunk`, `LazyChunk`, refresh suspension, panic button. |
-| `settings.py` | JSON prefs that cannot break Maya launch. |
+| `settings.py` | JSON prefs that cannot break Maya launch. Includes `ui.open_at_startup` ("", "strip", "panel", "both") -- read by `animkit.open_startup_ui()`, which is deliberately NOT part of `startup()` so that function can keep its no-Qt guarantee. |
 | `usage.py` | Local usage log for a build handed to testers. Operation names and counts only -- no node names, no paths, no scene names, and a failure records its exception CLASS not its message. Never touches the network. No Maya and no Qt, so it tests in plain CPython. |
 | `scene.py` | `MSceneMessage` callbacks → cache invalidation. |
 | `media.py` | What a dropped path is: an image, a movie, a sound, or one frame of a sequence. No Maya and no Qt, so it tests in plain CPython. |

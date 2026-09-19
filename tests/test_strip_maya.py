@@ -246,16 +246,30 @@ class TestDockTargets:
 
         assert mayawin.can_dock_to("animkitNoSuchControl") is False
 
+    def test_the_strip_docks_against_the_time_slider_first(self):
+        """The whole reason the strip exists is that the time slider is what
+        an animator watches while they work, so the bar has to be AGAINST it.
+
+        This led with ("MainPane", "bottom") once, which docks under the
+        viewport and therefore above everything stacked at the bottom -- with
+        a Graph Editor open, or merely collapsed to its title bar, the strip
+        sat above that with the time slider somewhere further down. Above the
+        timeline in a technical sense, and useless in the sense that matters.
+        """
+        from animkit.ui import strip
+
+        assert strip.DOCK_TARGETS[0] == ("TimeSlider", "top")
+
     def test_the_strip_names_a_fallback_that_always_exists(self):
         """graphEditor1Window does not exist until the Graph Editor has been
-        opened once. A single-target list would float on a fresh Maya and dock
-        on a used one -- so the last candidate has to be one that is always
-        there."""
+        opened once, so a list naming only it would float on a fresh Maya and
+        dock on a used one. At least one candidate has to be one that is
+        always there."""
         from animkit.ui import strip
 
         names = [name for name, _side in strip.DOCK_TARGETS]
         assert len(names) >= 2
-        assert names[-1] == "TimeSlider"
+        assert "TimeSlider" in names
 
     def test_every_dock_target_is_a_pair_of_strings(self):
         from animkit.ui import strip
@@ -263,3 +277,90 @@ class TestDockTargets:
         for target in strip.DOCK_TARGETS:
             assert len(target) == 2
             assert all(isinstance(part, str) for part in target)
+
+
+class TestHeight:
+    """A one-row bar has to ask Maya for a one-row control.
+
+    Docked above the time slider, Maya hands a new control a share of the
+    space its neighbour had -- which made a row of 40-pixel buttons open
+    inside a 300-pixel slab of empty grey. Nothing here can see a pixel; what
+    it can see is the request, which is where the omission was.
+    """
+
+    def test_the_strip_asks_for_a_one_row_height(self):
+        from animkit.ui import strip, style
+
+        assert strip.INITIAL_HEIGHT > 0
+        # Tied to the button metric, not typed as a number, so it follows if
+        # the buttons ever change size.
+        assert strip.INITIAL_HEIGHT > style.ICON_BUTTON
+        assert strip.INITIAL_HEIGHT < style.ICON_BUTTON * 3
+
+    @staticmethod
+    def _recorder(monkeypatch, reject_height=False, dockable="TimeSlider"):
+        """Stand in for cmds.workspaceControl and record the CREATE calls.
+
+        It has to answer the exists-query falsely, or show_workspace_control
+        takes its "already there, just restore it" branch and never creates
+        anything -- which is what the first version of these tests did, and
+        they passed while proving nothing.
+        """
+        from animkit.ui import mayawin
+
+        calls = []
+
+        def fake(name, **kwargs):
+            if kwargs.get("q") or kwargs.get("query"):
+                return False
+            if kwargs.get("e") or kwargs.get("edit"):
+                return name
+            calls.append(dict(kwargs))
+            if reject_height and "heightProperty" in kwargs:
+                raise RuntimeError("Invalid flag: heightProperty")
+            return name
+
+        monkeypatch.setattr(mayawin.cmds, "workspaceControl", fake)
+        monkeypatch.setattr(mayawin, "is_built", lambda name: True)
+        monkeypatch.setattr(mayawin, "first_dockable", lambda dock_to: dockable)
+        return calls
+
+    def test_height_reaches_maya_as_a_fixed_property(self, monkeypatch):
+        """initialHeight alone only says where the stretching starts from.
+        heightProperty is the flag that stops it stretching."""
+        from animkit.ui import mayawin
+
+        calls = self._recorder(monkeypatch)
+        mayawin.show_workspace_control(
+            "animkitHeightProbe", "animkit", "pass", width=900, height=46,
+            dock_to=(("TimeSlider", "top"),))
+
+        assert len(calls) == 1
+        assert calls[0].get("initialHeight") == 46
+        assert calls[0].get("heightProperty") == "fixed"
+        assert calls[0].get("dockToControl") == "TimeSlider"
+
+    def test_no_height_flags_when_no_height_is_asked_for(self, monkeypatch):
+        from animkit.ui import mayawin
+
+        calls = self._recorder(monkeypatch, dockable=None)
+        mayawin.show_workspace_control("animkitHeightProbe", "animkit", "pass")
+
+        assert len(calls) == 1
+        assert "heightProperty" not in calls[0]
+        assert "initialHeight" not in calls[0]
+
+    def test_a_maya_that_rejects_the_height_flags_keeps_its_dock(self, monkeypatch):
+        """Losing the height costs a badly-sized panel. Losing the dock costs
+        a floating one. The retry must give up the cheaper thing first."""
+        from animkit.ui import mayawin
+
+        calls = self._recorder(monkeypatch, reject_height=True)
+        mayawin.show_workspace_control(
+            "animkitHeightProbe", "animkit", "pass", height=46,
+            dock_to=(("TimeSlider", "top"),))
+
+        assert len(calls) == 2, "should retry once, not fall straight to floating"
+        assert calls[-1].get("dockToControl") == "TimeSlider", "the dock survived"
+        assert "floating" not in calls[-1]
+        assert "heightProperty" not in calls[-1]

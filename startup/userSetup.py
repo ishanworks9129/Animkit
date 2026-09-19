@@ -35,6 +35,22 @@ def _animkit_startup():
         import animkit
 
         animkit.startup()
+
+        # The two Qt-shaped steps, and only ever after startup(). It
+        # registers commands and callbacks and touches no Qt; these need
+        # Maya's UI to exist, which by the time this deferred call runs it
+        # does.
+        #
+        # All three live inside one deferred call rather than three, so the
+        # order is not at the mercy of Maya's idle queue: a panel cannot be
+        # built before the commands its buttons carry are registered.
+        animkit.open_startup_ui()
+
+        # Arms the viewport for dropped video and images. Without it the drop
+        # falls through to Maya, which tries to open the .mp4 as a scene and
+        # reports "No translator found" -- and the animator concludes the
+        # feature is broken.
+        animkit.install_viewport_drop()
     except Exception:
         import traceback
 

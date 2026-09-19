@@ -518,11 +518,28 @@ def set_enabled(enabled, remember=True):
 
 
 def install_if_wanted():
-    """Honour the saved setting. Called when the Ref tab builds.
+    """Honour the saved setting. Idempotent, so every caller may just call it.
 
-    Not called from `animkit.startup()` on purpose -- startup runs from
-    userSetup.py, before Maya has a UI, and there are no model panels to hook
-    yet. Anything Qt-shaped there fails on some machines and not others.
+    Called from three places, and it needs all three:
+
+      * the Ref tab building, which is where it started;
+      * `animkit.install_viewport_drop()`, run deferred from
+        startup/userSetup.py on every launch;
+      * the drag-and-drop installer, so the current session is armed too.
+
+    The Ref tab alone was not enough, and the way that failed is worth
+    keeping written down: drop a video on the viewport without having opened
+    that one tab, and the event never reached animkit at all. Maya's own
+    handler took it, tried to open the .mp4 as a scene file, and printed
+    "No translator found" from performFileAction.mel -- which reads as
+    animkit's headline reference feature being broken, because from the
+    animator's side it is.
+
+    Still NOT called from `animkit.startup()`, and that part of the original
+    reasoning stands: startup runs from userSetup.py before Maya has a UI,
+    there are no model panels to hook yet, and anything Qt-shaped there fails
+    on some machines and not others. The deferred caller above is the fix for
+    that, not an exception to it.
     """
     if settings.get("reference.viewport_drop"):
         return install()
