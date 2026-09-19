@@ -772,6 +772,63 @@ def run():
 
         report.check("moved key merges onto an occupied frame", _op_merges_not_nudges)
 
+        def _bake_preserves_sampled_frames():
+            """Bake on twos halves a dense curve and moves nothing it keeps.
+
+            The environment-specific risk this covers is not the arithmetic --
+            tests/test_bake_maya.py has that. It is that `setKeyframe` on an
+            animCurve node inherits Maya's DEFAULT TANGENT PREFERENCE, which is
+            a per-user setting on the machine the tool is installed on. bake
+            states its tangents for that reason, and this is the check that
+            says the values still land where they were read on a real install.
+            """
+            from animkit.core import layers
+            from animkit.tools import keys
+
+            node = cmds.createNode("transform", name=PREFIX + "bake")
+            try:
+                for frame in range(1, 12):
+                    cmds.setKeyframe(node + ".tx", time=frame,
+                                     value=float(frame) ** 2)
+                cmds.select(node)
+                cmds.currentTime(6)
+                cmds.selectKey(clear=True)
+
+                curve = layers.resolve_curve(node + ".tx")
+
+                def worth(frame):
+                    found = cmds.keyframe(curve, q=True, eval=True,
+                                          time=(frame, frame))
+                    return found[0] if found else None
+
+                kept = (1, 3, 5, 7, 9, 11)
+                before = dict((f, worth(f)) for f in kept)
+
+                keys.bake_every(step=2)
+
+                times = sorted(cmds.keyframe(node + ".tx", q=True,
+                                             timeChange=True) or [])
+                worst = 0.0
+                for frame in kept:
+                    now = worth(frame)
+                    if now is None or before[frame] is None:
+                        worst = float("inf")
+                        break
+                    worst = max(worst, abs(now - before[frame]))
+
+                ok = times == [float(f) for f in kept] and worst < 1e-6
+                return ok, "11 keys -> {0}, worst drift {1:g}".format(
+                    len(times), worst
+                )
+            finally:
+                try:
+                    cmds.delete(node)
+                except Exception:
+                    pass
+
+        report.check("bake on twos keeps the frames it samples",
+                     _bake_preserves_sampled_frames)
+
         def _cycle_applies():
             """setInfinity on an animCurve NODE is silently ignored -- it
             returns cleanly and changes nothing. keys.set_cycle goes through

@@ -1890,3 +1890,537 @@ class TestRegistry:
         pose._clipboard = None
         for op in pose.OPERATIONS:
             assert op.invoke() in (0, None) or True  # must simply not raise
+
+
+def pose_left_over_time(cmds, pairs, frames=(1, 5, 9)):
+    """Pose the left arm DIFFERENTLY on each frame, keying as Auto Key would.
+
+    Different on each frame on purpose: a range mirror that only ever read the
+    frame the playhead started on would still pass a fixture whose every frame
+    held the same pose, and that is exactly the bug worth catching.
+    """
+    for index, frame in enumerate(frames):
+        cmds.currentTime(frame)
+        step = index + 1
+        for node, values in (
+            (pairs[0][0], (12 * step, -20, 35)),
+            (pairs[1][0], (5, 15 * step, -40)),
+            (pairs[2][0], (-8, 3, 22 * step)),
+        ):
+            cmds.setAttr(node + ".rotate", *values)
+            cmds.setKeyframe(node + ".rotate")
+
+
+def pose_both_over_time(cmds, pairs, frames=(1, 5, 9)):
+    """Pose the left arm over time and key the right one on the same frames.
+
+    Flip-twice-is-identity is only a fair question when both sides carry keys
+    on the same frames. With the right side keyed on frame 1 alone, the first
+    flip legitimately densifies it -- the second flip then has more to work
+    with than the first did, and the round trip is not expected to close.
+    """
+    for index, frame in enumerate(frames):
+        cmds.currentTime(frame)
+        step = index + 1
+        for node, values in (
+            (pairs[0][0], (12 * step, -20, 35)),
+            (pairs[1][0], (5, 15 * step, -40)),
+            (pairs[2][0], (-8, 3, 22 * step)),
+        ):
+            cmds.setAttr(node + ".rotate", *values)
+            cmds.setKeyframe(node + ".rotate")
+        for _left, right in pairs:
+            cmds.setKeyframe(right + ".rotate")
+
+
+class TestMirrorRange:
+    """Mirror and flip across time rather than on the current frame.
+
+    Every assertion here walks EVERY frame in the range. An assertion on a
+    single frame passes just as happily on an operation that mirrored the
+    playhead's frame and left the rest of the shot alone, which is the failure
+    this feature is most likely to have.
+    """
+
+    FRAMES = (1, 5, 9)
+
+    def test_every_keyed_frame_is_mirrored(self, rig):
+        from animkit.tools import pose
+
+        cmds, pairs, root, _spine = rig
+        cmds.setAttr(root + ".translateX", 100)  # character NOT at the origin
+        pose_left_over_time(cmds, pairs, self.FRAMES)
+
+        nodes = [n for pair in pairs for n in pair]
+        cmds.select(nodes)
+        assert pose.mirror_range() > 0
+
+        reflection = live_reflection(cmds, root)
+        worst = 0.0
+        for frame in self.FRAMES:
+            cmds.currentTime(frame)
+            for a, b in pairs:
+                want = reflected(a, b, cmds, reflection)
+                got = wpos(cmds, b)
+                worst = max(worst, max(abs(g - w) for g, w in zip(got, want)))
+        assert worst < TOL, "worst position error across the range: %g" % worst
+
+    def test_flip_range_twice_is_identity(self, rig):
+        """The invariant, measured as worst drift across every frame."""
+        from animkit.tools import pose
+
+        cmds, pairs, _root, _spine = rig
+        pose_both_over_time(cmds, pairs, self.FRAMES)
+        nodes = [n for pair in pairs for n in pair]
+
+        before = {}
+        for frame in self.FRAMES:
+            cmds.currentTime(frame)
+            before[frame] = dict((n, wpos(cmds, n)) for n in nodes)
+
+        cmds.select(nodes)
+        pose.flip_range()
+        cmds.select(nodes)
+        pose.flip_range()
+
+        worst = 0.0
+        for frame in self.FRAMES:
+            cmds.currentTime(frame)
+            for node in nodes:
+                got = wpos(cmds, node)
+                worst = max(
+                    worst,
+                    max(abs(g - w) for g, w in zip(got, before[frame][node])),
+                )
+        assert worst < TOL, "worst drift after two flips: %g" % worst
+
+    def test_it_is_one_undo_step(self, rig):
+        """A whole range mirror, back in one Ctrl+Z.
+
+        Asserted on the CURVES rather than on positions: what must be restored
+        is what was written, and a getAttr comparison would be reading DG state
+        across a topology change.
+        """
+        from animkit.tools import pose
+
+        cmds, pairs, _root, _spine = rig
+        pose_left_over_time(cmds, pairs, self.FRAMES)
+        nodes = [n for pair in pairs for n in pair]
+
+        def curves_now():
+            state = {}
+            for node in nodes:
+                for axis in "XYZ":
+                    plug = "{0}.rotate{1}".format(node, axis)
+                    state[plug] = (
+                        tuple(cmds.keyframe(plug, q=True, timeChange=True) or []),
+                        tuple(cmds.keyframe(plug, q=True, valueChange=True) or []),
+                    )
+            return state
+
+        before = curves_now()
+        cmds.select(nodes)
+        assert pose.mirror_range() > 0
+        assert curves_now() != before, "fixture failed: nothing was mirrored"
+
+        cmds.undo()
+        assert curves_now() == before
+
+    def test_it_puts_the_playhead_back(self, rig):
+        """It scrubs to do its job. Leaving the animator somewhere else is rude
+        and, worse, makes the next operation act on a different frame."""
+        from animkit.tools import pose
+
+        cmds, pairs, _root, _spine = rig
+        pose_left_over_time(cmds, pairs, self.FRAMES)
+        cmds.currentTime(7)
+
+        cmds.select([n for pair in pairs for n in pair])
+        pose.mirror_range()
+
+        assert cmds.currentTime(q=True) == 7
+
+    def test_only_keyed_frames_are_visited(self, rig):
+        """It must not invent keys on frames the animator left empty.
+
+        House rule 7: an unkeyed frame is a question nothing in the scene can
+        answer, and inventing an answer is what collapsed a facial board.
+        """
+        from animkit.tools import pose
+
+        cmds, pairs, _root, _spine = rig
+        pose_left_over_time(cmds, pairs, self.FRAMES)
+
+        cmds.select([n for pair in pairs for n in pair])
+        pose.mirror_range()
+
+        allowed = set(float(f) for f in self.FRAMES)
+        for _left, right in pairs:
+            for axis in "XYZ":
+                times = cmds.keyframe(
+                    "{0}.rotate{1}".format(right, axis), q=True,
+                    timeChange=True,
+                ) or []
+                assert set(times) <= allowed, (
+                    "%s gained a key on an unkeyed frame: %s" % (right, times)
+                )
+
+    def test_a_range_limits_the_frames(self, rig):
+        from animkit.tools import pose
+
+        cmds, pairs, _root, _spine = rig
+        pose_left_over_time(cmds, pairs, self.FRAMES)
+
+        cmds.select([n for pair in pairs for n in pair])
+        assert pose.mirror_range(start=4, end=6) > 0
+
+        _left, right = pairs[0]
+        times = cmds.keyframe(right + ".rotateX", q=True, timeChange=True) or []
+        assert 5.0 in times
+        assert 9.0 not in times, "mirrored outside the requested range"
+
+    def test_refusal_writes_nothing_at_all(self, rig):
+        """Refusing HALFWAY would leave a range that looks finished and is not.
+
+        The dry run exists for exactly this, so the assertion is that the
+        curves are untouched -- not merely that it returned 0.
+        """
+        from animkit.tools import pose
+
+        cmds, pairs, _root, _spine = rig
+        pose_left_over_time(cmds, pairs, self.FRAMES)
+        break_rest_symmetry(cmds)
+
+        nodes = [n for pair in pairs for n in pair]
+        before = {}
+        for node in nodes:
+            for axis in "XYZ":
+                plug = "{0}.rotate{1}".format(node, axis)
+                before[plug] = tuple(
+                    cmds.keyframe(plug, q=True, valueChange=True) or []
+                )
+
+        cmds.select(nodes)
+        assert pose.mirror_range() == 0
+
+        for plug, values in before.items():
+            got = tuple(cmds.keyframe(plug, q=True, valueChange=True) or [])
+            assert got == values, "%s was written despite the refusal" % plug
+
+    def test_no_keys_is_a_clean_nothing(self, rig):
+        from animkit.tools import pose
+
+        cmds, pairs, _root, _spine = rig
+        nodes = [n for pair in pairs for n in pair]
+        for node in nodes:
+            cmds.cutKey(node, clear=True)
+
+        cmds.select(nodes)
+        assert pose.mirror_range() == 0
+
+    def test_keyed_frames_deduplicates_a_dragged_key(self, rig):
+        """A dragged key lands on 1.0000001700680272. Not a second frame."""
+        from animkit.tools import pose
+
+        cmds, pairs, _root, _spine = rig
+        left = pairs[0][0]
+        cmds.currentTime(1)
+        cmds.setAttr(left + ".rotate", 10, 20, 30)
+        cmds.setKeyframe(left + ".rotate")
+
+        assert pose.keyed_frames([left]) == [1.0]
+
+
+class TestRangeRefusesEarly:
+    """Refusing must cost nothing. On a real scene it cost 3.3 seconds.
+
+    Eight props with no counterparts were mirrored: pass 1 scrubbed the whole
+    range capturing poses, and only then was it discovered that nothing paired.
+    Pairing is a rest-pose question and does not depend on time at all.
+
+    THE PROPS HANG OFF THE RIG ROOT, and that detail is the fixture.
+    `reflection_for` derives the mirror plane from the first node's ROOT, so a
+    handful of loose transforms in an empty scene produce a plane through
+    themselves -- and the first node then pairs with itself and mirrors
+    perfectly well. Two earlier versions of this fixture measured exactly that
+    and reported it as a bug in the code. Parented under a rig that already
+    has a symmetry plane, a prop at x=5 with nothing at x=-5 is genuinely
+    unpaired, which is the real case.
+    """
+
+    @staticmethod
+    def _lonely_props(cmds, root, count=3, frames=range(1, 10)):
+        made = []
+        for index in range(count):
+            offset = cmds.createNode(
+                "transform", name="propOffset%d" % index, parent=root)
+            cmds.setAttr(offset + ".translateX", 5.0 + index * 3)
+            node = cmds.createNode(
+                "transform", name="prop%d" % index, parent=offset)
+            for frame in frames:
+                cmds.setKeyframe(node + ".tx", time=frame, value=float(frame))
+            made.append(node)
+        return made
+
+    def test_the_fixture_really_has_no_counterparts(self, rig):
+        """Guards the two below. If these ever start pairing, those tests stop
+        meaning anything and would still pass."""
+        from animkit.core import pairing
+
+        cmds, _pairs, root, _spine = rig
+        props = self._lonely_props(cmds, root)
+        report = pairing.analyse(props)
+        assert not report.pairs, "fixture paired: %r" % (report.pairs,)
+
+    def test_no_counterparts_writes_nothing(self, rig):
+        from animkit.tools import pose
+
+        cmds, _pairs, root, _spine = rig
+        props = self._lonely_props(cmds, root)
+        before = dict(
+            (node, tuple(cmds.keyframe(node + ".tx", q=True,
+                                       valueChange=True) or []))
+            for node in props
+        )
+
+        cmds.select(props)
+        assert pose.mirror_range() == 0
+
+        for node in props:
+            assert tuple(
+                cmds.keyframe(node + ".tx", q=True, valueChange=True) or []
+            ) == before[node]
+
+    def test_it_does_not_scrub_the_range_to_find_that_out(self, rig):
+        """Asserted on the playhead, which is the observable side effect of
+        pass 1. If time never moved, the capture pass never ran."""
+        from animkit.tools import pose
+
+        cmds, _pairs, root, _spine = rig
+        props = self._lonely_props(cmds, root, frames=range(1, 40))
+
+        cmds.currentTime(7)
+        cmds.select(props)
+
+        moved = []
+        original = cmds.currentTime
+
+        def watch(*args, **kwargs):
+            if args and not kwargs.get("q") and not kwargs.get("query"):
+                moved.append(args[0])
+            return original(*args, **kwargs)
+
+        cmds.currentTime = watch
+        try:
+            assert pose.mirror_range() == 0
+        finally:
+            cmds.currentTime = original
+
+        assert moved == [], "scrubbed %d frame(s) before refusing" % len(moved)
+
+
+# NOTE: there is deliberately no synthetic test for "asymmetric only on a later
+# frame". The real condition is a character that TRAVELS through a shot, so its
+# rest pose sits on the mirror plane for part of the range and not the rest --
+# and the hostile rig here cannot reproduce it. Animating a parent group does
+# not move the rest pose, because rest is computed with animated channels at
+# their defaults, which is exactly the property that makes rest useful.
+#
+# The evidence for that fix is a production shot, recorded in the docstring of
+# `_mirrored_range_write`: the same rig measured 1047 units out of symmetry at
+# one frame and symmetric at another, and the old single check passed at the
+# parked frame and then refused partway through writing. A test that cannot
+# create the condition would only assert that the code runs.
+
+
+class TestPlaneIsFittedWhenTheRootDoesNotCarryIt:
+    """The production failure: an identity root above an off-origin character.
+
+    `xform.mirror_plane` reads the plane off the rig ROOT's rest matrix, which
+    is right whenever the root transform carries the placement. A rig that
+    bakes the placement into where its joints were BUILT leaves an identity
+    group on top, and the plane comes out as the world YZ while the character
+    stands somewhere else entirely -- so every left/right pair misses by twice
+    the character's offset and the mirror refuses on a symmetric rig.
+
+    Measured on a real one: root at the origin, character at x=-520 rotated
+    twelve degrees, every pair a thousand units out.
+    """
+
+    @staticmethod
+    def _offset_rig(cmds, centre=500.0, rotate=0.0):
+        """A symmetric character built away from the origin, identity root."""
+        root = cmds.createNode("transform", name="identityRoot")
+        made = []
+        for side, sign in (("L", 1.0), ("R", -1.0)):
+            for index, (dx, dy, dz) in enumerate(
+                    ((10.0, 100.0, 0.0), (20.0, 90.0, 5.0),
+                     (30.0, 80.0, 10.0), (40.0, 70.0, 15.0),
+                     (50.0, 60.0, 20.0))):
+                node = cmds.createNode(
+                    "transform", name="limb%d_%s" % (index, side),
+                    parent=root)
+                cmds.setAttr(node + ".translate",
+                             centre + sign * dx, dy, dz)
+                made.append(node)
+        # The root itself stays at the origin -- that is the whole point.
+        assert cmds.xform(root, q=True, worldSpace=True,
+                          translation=True) == [0.0, 0.0, 0.0]
+        return root, made
+
+    def test_the_root_plane_is_wrong_on_this_rig(self, clean_scene):
+        """Guards the test below: if the root's plane ever starts working
+        here, the fix is no longer being exercised."""
+        from animkit.core import cache, pairing, xform
+
+        cmds = clean_scene
+        root, made = self._offset_rig(cmds)
+        cache.invalidate()
+
+        from_root = xform.reflection_matrix(*xform.mirror_plane(root))
+        node = [n for n in made if n.endswith("_L")][0]
+        twin = node[:-2] + "_R"
+        distance, tolerance = pairing.rest_offset(node, twin, from_root)
+        assert distance > tolerance, (
+            "the root's plane already pairs this rig, so the fixture is not "
+            "reproducing the production failure")
+
+    def test_the_fitted_plane_finds_the_real_one(self, clean_scene):
+        from animkit.core import cache, pairing
+
+        cmds = clean_scene
+        _root, made = self._offset_rig(cmds, centre=500.0)
+        cache.invalidate()
+
+        fitted = pairing.fit_plane(made)
+        assert fitted is not None, "no plane was fitted at all"
+        point, normal = fitted
+        assert point[0] == pytest.approx(500.0, abs=1e-3), point
+        assert abs(normal[0]) == pytest.approx(1.0, abs=1e-3), normal
+
+    def test_reflection_for_uses_it_and_the_rig_pairs(self, clean_scene):
+        """The end of the chain: analyse() now succeeds on a rig that the
+        root's plane could not pair at all."""
+        from animkit.core import cache, pairing
+
+        cmds = clean_scene
+        _root, made = self._offset_rig(cmds, centre=500.0)
+        cache.invalidate()
+
+        report = pairing.analyse(made)
+        assert report.ok, report.describe()
+        assert len(report.pairs) == 5, report.pairs
+
+    def test_a_centred_rig_still_uses_the_root_plane(self, clean_scene):
+        """The fit must not take over where the root was already right.
+
+        Changing the answer underneath rigs that already mirror correctly
+        would be a poor trade for fixing the ones that do not, so the root is
+        tried first and kept whenever it pairs anything.
+        """
+        from animkit.core import cache, pairing, xform
+
+        cmds = clean_scene
+        root, made = self._offset_rig(cmds, centre=0.0)
+        cache.invalidate()
+
+        point, normal = pairing._plane_for_root(root)
+        assert point == pytest.approx([0.0, 0.0, 0.0], abs=1e-6)
+        assert abs(normal[0]) == pytest.approx(1.0, abs=1e-6)
+
+    def test_too_few_pairs_falls_back_rather_than_guessing(self, clean_scene):
+        """Two pairs agreeing could be a coincidence -- a pair of props either
+        side of a character would do it. Below the support floor, keep the
+        root's plane rather than inventing one."""
+        from animkit.core import cache, pairing
+
+        cmds = clean_scene
+        root = cmds.createNode("transform", name="identityRoot")
+        made = []
+        for side, sign in (("L", 1.0), ("R", -1.0)):
+            node = cmds.createNode("transform", name="lonely_" + side,
+                                   parent=root)
+            cmds.setAttr(node + ".translate", 500.0 + sign * 10.0, 0, 0)
+            made.append(node)
+        cache.invalidate()
+
+        assert pairing.fit_plane(made) is None
+
+
+class TestRangeUndoIsOneStepOnManyFrames:
+    """Reproduces a two-press undo seen on a production shot.
+
+    `test_it_is_one_undo_step` above uses three keyed frames and passes. The
+    real failure was measured across sixteen, where one Ctrl+Z left the whole
+    target arm still mirrored and a second was needed -- so the writes were
+    landing in two chunks rather than one. House rule 3 is not negotiable: an
+    operation the animator sees as one thing is one undo step.
+    """
+
+    FRAMES = tuple(range(1, 33, 2))          # sixteen frames
+
+    def test_one_press_restores_everything(self, rig):
+        from animkit.tools import pose
+
+        cmds, pairs, _root, _spine = rig
+        pose_both_over_time(cmds, pairs, self.FRAMES)
+        nodes = [n for pair in pairs for n in pair]
+        source = [pair[0] for pair in pairs]
+
+        def curves():
+            state = {}
+            for node in nodes:
+                for axis in "XYZ":
+                    plug = "{0}.rotate{1}".format(node, axis)
+                    state[plug] = (
+                        tuple(cmds.keyframe(plug, q=True,
+                                            timeChange=True) or []),
+                        tuple(cmds.keyframe(plug, q=True,
+                                            valueChange=True) or []),
+                    )
+            return state
+
+        before = curves()
+        cmds.select(source)
+        assert pose.mirror_range() > 0, "fixture wrote nothing to undo"
+        assert curves() != before
+
+        cmds.undo()
+        after_one = curves()
+
+        if after_one != before:
+            differing = [p for p in before if before[p] != after_one.get(p)]
+            raise AssertionError(
+                "one undo left %d plug(s) mirrored -- the writes are in more "
+                "than one chunk: %s" % (len(differing), differing[:4])
+            )
+
+    def test_the_playhead_moving_does_not_split_the_chunk(self, rig):
+        """The specific suspicion: a currentTime inside the chunk.
+
+        A time change is undoable like anything else, so if one lands outside
+        the chunk -- or forces a boundary -- the operation stops being one
+        step. Asserted by leaving the playhead somewhere the range does not
+        include, so every frame visited is a real move.
+        """
+        from animkit.tools import pose
+
+        cmds, pairs, _root, _spine = rig
+        pose_both_over_time(cmds, pairs, self.FRAMES)
+        nodes = [n for pair in pairs for n in pair]
+        source = [pair[0] for pair in pairs]
+
+        def values():
+            return tuple(
+                tuple(cmds.keyframe("{0}.rotate{1}".format(node, axis),
+                                    q=True, valueChange=True) or [])
+                for node in nodes for axis in "XYZ"
+            )
+
+        cmds.currentTime(999)
+        before = values()
+        cmds.select(source)
+        assert pose.mirror_range() > 0
+
+        cmds.undo()
+        assert values() == before, "one undo did not restore it"

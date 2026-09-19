@@ -34,6 +34,16 @@ COMMANDS = (
         "import animkit.ui.tween_ui as m; m.show()",
     ),
     (
+        "animkitStripShow",
+        "Open the animkit strip, docked above the time slider",
+        "import animkit.ui.strip as m; m.show()",
+    ),
+    (
+        "animkitHelpShow",
+        "What can animkit do -- every operation and the key it is on",
+        "import animkit.ui.help_ui as m; m.show()",
+    ),
+    (
         "animkitTweenPrev30",
         "Tween 30% toward the previous key",
         "import animkit.tools.tween as t; t.tween_once(-0.3)",
@@ -202,6 +212,79 @@ COMMANDS = (
     COMMANDS + _keyframe_commands() + _pose_commands() + _set_commands()
     + _reference_commands() + _audio_commands()
 )
+
+
+def current_bindings():
+    """`{runTimeCommand name: "Alt+K"}` for whatever is bound right now.
+
+    NEEDS A REAL MAYA, and says so quietly rather than failing. Under
+    `maya.standalone` the hotkey system is never loaded and
+    `assignCommand -q -numElements` returns None, so this returns `{}` and the
+    help page reads every operation as unbound. That is the truthful answer
+    headlessly, and it is why the help page treats "unbound" as the normal
+    state rather than as an error -- animkit ships no hotkeys at all (house
+    rule 6), so on a fresh install every line genuinely is unbound.
+
+    A runTimeCommand is reached through a nameCommand, so the key is two hops
+    from the command. assignCommand knows both ends.
+    """
+    found = {}
+    try:
+        total = cmds.assignCommand(q=True, numElements=True)
+    except Exception:
+        log.debug("animkit: assignCommand unavailable", exc_info=True)
+        return found
+    if not total:
+        return found
+
+    for index in range(1, int(total) + 1):
+        try:
+            command = cmds.assignCommand(index, q=True, command=True)
+            keys = cmds.assignCommand(index, q=True, keyString=True)
+        except Exception:
+            continue
+        if not command:
+            continue
+        label = _key_label(keys)
+        if label:
+            found.setdefault(command, label)
+    return found
+
+
+def _key_label(keys):
+    """assignCommand's keyString, as something an animator reads.
+
+    THE MODIFIER ORDER HERE IS AN ASSUMPTION. `keyString` comes back as
+    [key, alt, ctrl, ...] with the flags as "0"/"1" strings on some versions
+    and as ints on others, and it cannot be checked without a UI -- the whole
+    hotkey system is absent under maya.standalone. So this tolerates both
+    shapes and any length, and the worst case it can produce is a modifier
+    named in the wrong order next to a key that is still correct.
+    """
+    if not keys:
+        return None
+    try:
+        key = keys[0]
+    except Exception:
+        return None
+    if not key or str(key).upper() in ("NONE", "0", ""):
+        return None
+
+    def flag(index):
+        try:
+            return str(keys[index]).strip().lower() not in (
+                "0", "", "none", "false"
+            )
+        except Exception:
+            return False
+
+    parts = []
+    if flag(2):
+        parts.append("Ctrl")
+    if flag(1):
+        parts.append("Alt")
+    parts.append(str(key))
+    return "+".join(parts)
 
 
 def register(verbose=False):

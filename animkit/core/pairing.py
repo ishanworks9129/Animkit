@@ -31,6 +31,7 @@ the bug those three primitives keep producing -- see the Symmetry class.
 """
 
 import logging
+import math
 import re
 
 from maya import cmds
@@ -239,10 +240,164 @@ def is_self_mirroring(node, reflection):
 # --- the public entry point -------------------------------------------------
 
 
+#: How many name-matched pairs a fitted plane has to satisfy before it is
+#: believed. Two pairs agreeing could be coincidence -- a pair of props either
+#: side of a character would do it. Four is enough that the agreement is the
+#: rig's symmetry rather than an accident.
+FIT_SUPPORT = 4
+
+#: How many candidate pairs the fit looks at. The cost is quadratic -- every
+#: candidate plane is scored against every pair -- and a rig that cannot show
+#: its symmetry in forty pairs is not going to show it in four hundred.
+FIT_SAMPLE = 40
+
+
+def _implied_plane(node, candidate):
+    """The one plane that could map `node` onto `candidate`, or None.
+
+    Their perpendicular bisector: normal along the line between them, passing
+    through their midpoint. A pair sitting on top of each other implies no
+    plane at all, which is what a centre control does.
+    """
+    try:
+        a = rest_position(node)
+        b = rest_position(candidate)
+    except Exception:
+        return None
+
+    delta = [b[i] - a[i] for i in range(3)]
+    length = math.sqrt(sum(c * c for c in delta))
+    if length < 1e-6:
+        return None
+    return (
+        [(a[i] + b[i]) / 2.0 for i in range(3)],
+        [c / length for c in delta],
+    )
+
+
+def _name_matched_pairs(pool, limit=FIT_SAMPLE):
+    """(node, candidate) suggested by NAME alone. Nothing verified yet."""
+    existing = set(pool)
+    found = []
+    seen = set()
+    for node in pool:
+        if node in seen:
+            continue
+        for candidate in candidate_names(node):
+            if candidate in existing and candidate != node:
+                found.append((node, candidate))
+                seen.add(node)
+                seen.add(candidate)
+                break
+        if len(found) >= limit:
+            break
+    return found
+
+
+def fit_plane(pool):
+    """The symmetry plane that most of `pool`'s name-matched pairs agree on.
+
+    WHY THIS EXISTS. `xform.mirror_plane` reads the plane off the rig ROOT's
+    rest matrix, on the reasoning that a rig built at x=500 or rotated is still
+    symmetric about itself. That is true whenever the root TRANSFORM carries
+    the placement -- and false on a rig that bakes the placement into where its
+    joints and controls were built, leaving an identity group on top.
+
+    Measured on a production rig: root at the origin, character standing at
+    x=-520, z=790, rotated about twelve degrees. Every left/right pair came out
+    a thousand units from where the root's plane said it should be, and the
+    mirror refused on a rig that is perfectly symmetric. Zeroing the character
+    onto the world origin made it work, which is a workaround and not an
+    answer, because a character is normally somewhere in a set.
+
+    So: ask the controls where the plane is instead of assuming the root knows.
+    Each pair implies exactly one plane, and on a symmetric rig they all imply
+    the SAME one -- on that rig the eight facial controls agreed to three
+    decimal places. Voting rather than averaging because the outliers are not
+    noise: a facial control board's widgets are laid out by spacing and a
+    posed limb is not at rest, and averaging those in would move the plane off
+    the answer the majority already agree on.
+
+    Returns (point, normal), or None when nothing has enough support to be
+    trusted -- in which case the caller keeps the root's plane, which is right
+    far more often than it is wrong.
+    """
+    pairs = _name_matched_pairs(pool)
+    if len(pairs) < FIT_SUPPORT:
+        return None
+
+    best = None
+    best_support = 0
+    for node, candidate in pairs:
+        plane = _implied_plane(node, candidate)
+        if plane is None:
+            continue
+        reflection = xform.reflection_matrix(*plane)
+
+        support = 0
+        for other, twin in pairs:
+            distance, tolerance = rest_offset(other, twin, reflection)
+            if distance <= tolerance:
+                support += 1
+
+        if support > best_support:
+            best, best_support = plane, support
+
+    if best_support < FIT_SUPPORT:
+        return None
+    return best
+
+
+@cache.cached
+def _plane_for_root(root):
+    """The rig's plane: the root's own, unless the controls disagree.
+
+    THE ROOT IS TRIED FIRST AND KEPT WHEN IT WORKS. It is correct on every rig
+    whose top transform carries the placement, it costs one matrix read, and
+    changing the answer underneath rigs that already mirror correctly would be
+    a poor trade for fixing the ones that do not. The fit only runs when the
+    root's plane pairs almost nothing, which is the signature of it being
+    wrong rather than of the rig being asymmetric.
+    """
+    point, normal = xform.mirror_plane(root)
+    from_root = xform.reflection_matrix(point, normal)
+
+    try:
+        pool = search_pool(root)
+    except Exception:
+        return point, normal
+    pairs = _name_matched_pairs(pool)
+    if len(pairs) < FIT_SUPPORT:
+        return point, normal
+
+    support = 0
+    for node, candidate in pairs:
+        distance, tolerance = rest_offset(node, candidate, from_root)
+        if distance <= tolerance:
+            support += 1
+    if support >= FIT_SUPPORT:
+        return point, normal
+
+    fitted = fit_plane(pool)
+    if fitted is None:
+        return point, normal
+
+    log.info(
+        "animkit: the rig root's plane matched %d of %d left/right pair(s), so "
+        "the mirror plane was fitted from the controls instead: through "
+        "(%.3f, %.3f, %.3f), normal (%.3f, %.3f, %.3f). The root is probably "
+        "an identity group above a character that was built off the origin.",
+        support, len(pairs),
+        fitted[0][0], fitted[0][1], fitted[0][2],
+        fitted[1][0], fitted[1][1], fitted[1][2],
+    )
+    return fitted
+
+
 def reflection_for(node, root=None):
     """The reflection matrix for the rig `node` belongs to."""
     root = root or root_of(node)
-    return xform.reflection_matrix(*xform.mirror_plane(root))
+    return xform.reflection_matrix(*_plane_for_root(root))
 
 
 def counterpart(node, reflection=None, pool=None):

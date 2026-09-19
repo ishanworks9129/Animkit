@@ -13,6 +13,9 @@ animkit/vendor/ffmpeg/win64/ffmpeg.exe
 animkit/vendor/ffmpeg/macos/ffmpeg
 animkit/vendor/ffmpeg/linux/ffmpeg
 
+# Release packages built by scripts/make_release.ps1.
+dist/
+
 # Editor / OS
 .vscode/
 .idea/

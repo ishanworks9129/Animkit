@@ -14,6 +14,7 @@ _SUBMODULES = (
     "animkit.core.scene",
     "animkit.core.cache",
     "animkit.core.settings",
+    "animkit.core.usage",
     "animkit.core.media",
     "animkit.core.transcode",
     "animkit.core.layers",
@@ -66,7 +67,7 @@ def startup(verbose=False):
     so anything that touches Qt here will fail on some machines and not
     others, which is the worst possible failure mode to debug.
     """
-    from animkit.core import rest_store, scene, settings
+    from animkit.core import rest_store, scene, settings, usage
     from animkit import commands
 
     # Deliberately first, and deliberately not wrapped in a try/except here:
@@ -80,6 +81,10 @@ def startup(verbose=False):
     rest_store.install()
     scene.install_callbacks()
     commands.register(verbose=verbose)
+
+    # After settings.load(), because it asks settings whether it is even on,
+    # and it is a no-op if it is not. Writes one line per Maya session.
+    usage.session_start()
 
     # And load whatever the already-open scene carries. install() only wires
     # the callback, which fires on the NEXT open -- startup() itself usually

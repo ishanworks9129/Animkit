@@ -99,7 +99,8 @@ def is_built(control_name):
     return bool(widget.property(BUILT_PROPERTY))
 
 
-def show_workspace_control(control_name, label, build_code, width=320):
+def show_workspace_control(control_name, label, build_code, width=320,
+                           dock_to=None):
     """Create, restore or raise a dockable panel.
 
     build_code is a Python one-liner that fills the current parent, e.g.
@@ -115,6 +116,14 @@ def show_workspace_control(control_name, label, build_code, width=320):
     recreated rather than restored. Otherwise a single failed uiScript leaves a
     permanently empty panel that every later show() politely restores, with no
     way out but knowing to delete it by hand.
+
+    `dock_to` is `(control, side)` -- e.g. `("TimeSlider", "top")` -- and is
+    applied ONLY when the control is first created. Maya remembers where a
+    workspaceControl was left, so re-docking it on every show() would drag it
+    back out of wherever the animator moved it to, every single time. It is
+    also best-effort: docking to a control that does not exist in this Maya
+    must leave a floating panel and a log line, not a traceback out of a
+    uiScript at startup.
     """
     if cmds.workspaceControl(control_name, q=True, exists=True):
         if is_built(control_name):
@@ -131,14 +140,38 @@ def show_workspace_control(control_name, label, build_code, width=320):
         )
         delete_workspace_control(control_name)
 
-    cmds.workspaceControl(
-        control_name,
-        label=label,
-        retain=False,
-        floating=True,
-        initialWidth=width,
-        uiScript=build_code,
-    )
+    kwargs = {
+        "label": label,
+        "retain": False,
+        "initialWidth": width,
+        "uiScript": build_code,
+    }
+
+    # DOCK AT CREATION, NOT AFTERWARDS.
+    #
+    # `-dockToControl` is a CREATION flag. Created with `-floating` and then
+    # edited to dock, the control simply stays floating and the edit is
+    # ignored without complaint -- which is what the first version of this did,
+    # leaving every fresh install to drag the bar into place by hand while the
+    # log cheerfully said it had docked it.
+    chosen = first_dockable(dock_to)
+    if chosen:
+        kwargs["dockToControl"] = chosen
+    else:
+        kwargs["floating"] = True
+
+    try:
+        cmds.workspaceControl(control_name, **kwargs)
+    except Exception:
+        # An unusable dock target must not cost the animator the panel.
+        log.info(
+            "animkit: could not create %s docked to %r -- falling back to "
+            "floating. Drag it where you want it and Maya will remember.",
+            control_name, dock_to, exc_info=True,
+        )
+        kwargs.pop("dockToControl", None)
+        kwargs["floating"] = True
+        cmds.workspaceControl(control_name, **kwargs)
 
     # The uiScript runs synchronously during creation, so a populated panel is
     # verifiable right now. Say so plainly instead of handing back an empty
@@ -151,6 +184,72 @@ def show_workspace_control(control_name, label, build_code, width=320):
             control_name,
         )
     return control_name
+
+
+def dock_candidates(dock_to):
+    """Normalise `dock_to` into a list of `(control, side)` pairs.
+
+    Accepts one pair or a sequence of them, so a caller can say "above the
+    Graph Editor, or above the time slider if the Graph Editor is not open"
+    without every caller growing its own loop.
+    """
+    if not dock_to:
+        return []
+    first = dock_to[0]
+    if isinstance(first, (tuple, list)):
+        return [tuple(pair) for pair in dock_to]
+    return [tuple(dock_to)]
+
+
+def first_dockable(dock_to):
+    """The first candidate that exists in this Maya, or None.
+
+    A LIST RATHER THAN ONE TARGET, because the good targets are not all
+    always there. `graphEditor1Window` does not exist until the Graph Editor
+    has been opened at least once, so a tool that named only that one would
+    float on a fresh Maya and dock on a used one -- the same install behaving
+    two different ways for a reason nobody could see.
+    """
+    for target, side in dock_candidates(dock_to):
+        if can_dock_to(target):
+            return (target, side)
+    return None
+
+
+def can_dock_to(target):
+    """Is `target` a workspaceControl this Maya actually has?
+
+    Maya's time slider is itself a workspaceControl, which is what lets a tool
+    sit against it without reaching into Maya's own layout. The NAME of that
+    control is version-dependent, so this is a question and not an assumption:
+    a missing target leaves the panel floating with a line in the log, rather
+    than raising out of a uiScript during Maya's startup.
+    """
+    try:
+        return bool(cmds.workspaceControl(target, q=True, exists=True))
+    except Exception:
+        log.debug("animkit: could not query %s", target, exc_info=True)
+        return False
+
+
+def redock(control_name, dock_to):
+    """Force an EXISTING control back onto its dock target.
+
+    Deletes and recreates rather than editing, because editing a floating
+    control to be docked does not work -- see the creation path above. Only for
+    the "it opened floating, put it where it belongs" case; normal show() must
+    never call this, or it would drag the panel out of wherever the animator
+    moved it every time they opened it.
+    """
+    if not first_dockable(dock_to):
+        log.warning(
+            "animkit: none of %r is a workspaceControl in this Maya, so there "
+            "is nothing to dock %s against.",
+            [name for name, _side in dock_candidates(dock_to)], control_name,
+        )
+        return False
+    delete_workspace_control(control_name)
+    return True
 
 
 def clear_children(widget):

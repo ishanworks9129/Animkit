@@ -607,6 +607,105 @@ def _ref_remove(p, c):
     _line(p, 18, 76, 82, 76)
 
 
+def _mirror_range(p, c):
+    """Mirror, but across the timeline rather than on one frame.
+
+    The mirror glyph pushed into the top half with a keyed timeline underneath.
+    The timeline is the whole difference from `_mirror`, and `_flip_range` uses
+    the same device -- so the pair still reads as a pair, which is the point.
+
+    `_pen` is re-set before every `_solid` and every `_key`: both leave the
+    painter on NoPen, and the next shape would take its colour from that.
+    """
+    _pen(p, c, STROKE * 0.5)
+    _line(p, 50, 8, 50, 54)
+    _pen(p, c, STROKE * 0.8)
+    _solid(p, [(40, 18), (20, 32), (40, 46)])
+    _pen(p, c, STROKE * 0.8)
+    _solid(p, [(60, 18), (80, 32), (60, 46)])
+    _pen(p, c, STROKE * 0.45)
+    _line(p, 14, 78, 86, 78)
+    for x in (22, 50, 78):
+        _pen(p, c)
+        _key(p, x, 78, 8)
+
+
+def _flip_range(p, c):
+    """Flip, across the timeline. Mirror's two shapes, exchanged."""
+    _pen(p, c, STROKE * 0.5)
+    _line(p, 50, 8, 50, 54)
+    _pen(p, c, STROKE * 0.8)
+    _solid(p, [(42, 10), (22, 24), (42, 38)])
+    _pen(p, c, STROKE * 0.8)
+    _solid(p, [(58, 26), (78, 40), (58, 54)])
+    _pen(p, c, STROKE * 0.45)
+    _line(p, 14, 78, 86, 78)
+    for x in (22, 50, 78):
+        _pen(p, c)
+        _key(p, x, 78, 8)
+
+
+#: Seven-segment geometry for the bake numerals, on the usual 0-100 canvas.
+#: a=top, b=upper right, c=lower right, d=bottom, e=lower left, f=upper left,
+#: g=middle.
+_SEG = {
+    "a": ((32, 18), (68, 18)),
+    "b": ((68, 18), (68, 42)),
+    "c": ((68, 42), (68, 66)),
+    "d": ((32, 66), (68, 66)),
+    "e": ((32, 42), (32, 66)),
+    "f": ((32, 18), (32, 42)),
+    "g": ((32, 42), (68, 42)),
+}
+
+#: Which segments each bake step lights. 1 is drawn as a stem and a flag
+#: instead, because seven-segment "1" is a bare right-hand bar that reads as a
+#: stray line rather than as a number.
+_DIGITS = {
+    2: "abged",
+    3: "abgcd",
+    4: "fgbc",
+    5: "afgcd",
+    6: "afgecd",
+    7: "abc",
+}
+
+
+def _bake(step):
+    """The step as a NUMERAL over a timeline. One painter per step.
+
+    THE NUMBER HAS TO BE IN THE PICTURE, and that is not a stylistic choice.
+    `panel.OperationButton` draws an icon OR a label and never both -- so an
+    operation that has an icon has thrown its label away. Seven bake buttons
+    sharing a wordless "sampling density" mark therefore reach the animator as
+    seven identical buttons with no numbers anywhere, which is precisely what
+    the first draft of these did: the contact sheet at 16px showed steps 1
+    through 5 as the same row of dots over a line.
+
+    A digit is the one thing that stays legible at 16px and is unambiguously
+    different from its neighbours, which is also what makes the distinctness
+    test pass honestly rather than by four pixels.
+
+    The rule underneath is the one the tangent icons learned: draw the thing
+    that has to be TOLD APART, not the thing that is being described.
+    """
+    def paint(p, c):
+        _pen(p, c, STROKE * 0.8)
+        if step == 1:
+            _line(p, 50, 18, 50, 66)
+            _line(p, 40, 27, 50, 18)
+        else:
+            for segment in _DIGITS.get(step, "abgcd"):
+                (x1, y1), (x2, y2) = _SEG[segment]
+                _line(p, x1, y1, x2, y2)
+        # The timeline the number applies to. Shared by all seven, so it says
+        # "frames" without competing with the digit for legibility.
+        _pen(p, c, STROKE * 0.45)
+        _line(p, 20, 84, 80, 84)
+
+    return paint
+
+
 # --- the registry -----------------------------------------------------------
 
 #: runTimeCommand name -> painter. An operation with no entry falls back to its
@@ -636,6 +735,8 @@ PAINTERS = {
     "animkitPosePasteMirrored": _paste_mirrored,
     "animkitPoseMirror": _mirror,
     "animkitPoseFlip": _flip,
+    "animkitPoseMirrorRange": _mirror_range,
+    "animkitPoseFlipRange": _flip_range,
     "animkitPoseCaptureRest": _capture_rest,
     "animkitPoseClearRest": _clear_rest,
     "animkitPoseReset": _reset,
@@ -657,6 +758,16 @@ PAINTERS = {
     "animkitRefFrame": _ref_frame,
     "animkitRefRemove": _ref_remove,
 }
+
+
+# Bake: one painter per step in keys.BAKE_STEPS. Deliberately NOT imported
+# from there -- animkit.ui does not need animkit.tools in order to draw a
+# picture, and adding that import would drag maya.cmds into the icon set. The
+# drift this risks is already covered: test_every_keyframe_operation fails the
+# moment a bake step exists without an icon.
+PAINTERS.update(
+    ("animkitKeysBake%d" % _step, _bake(_step)) for _step in range(1, 8)
+)
 
 
 def has_icon(name):

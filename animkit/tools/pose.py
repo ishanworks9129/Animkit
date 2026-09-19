@@ -755,6 +755,270 @@ def flip_selected():
     return _mirrored_write(nodes, "flip pose", swap=True)
 
 
+def keyed_frames(nodes, start=None, end=None):
+    """Every frame carrying a key on any animated channel of `nodes`.
+
+    ONLY FRAMES THAT ALREADY CARRY KEYS. A mirror over a range must not invent
+    keys on frames the animator left empty -- that is the same ambiguity house
+    rule 7 exists for, and inventing them is how Reset once collapsed a facial
+    control board. A frame with a key on it is a frame the animator has already
+    declared they care about; an empty frame is a question nothing in the scene
+    can answer.
+
+    Times are rounded to 6 places before being de-duplicated, because a key
+    that has been dragged sits on 1.0000001700680272 and would otherwise become
+    a second, near-identical frame in the list.
+    """
+    found = set()
+    for node, channels in animated_plugs(nodes).items():
+        for channel in channels:
+            plug = "{0}.{1}".format(node, channel)
+            for when in cmds.keyframe(plug, q=True, timeChange=True) or []:
+                if start is not None and when < start - 1e-6:
+                    continue
+                if end is not None and when > end + 1e-6:
+                    continue
+                found.add(round(when, 6))
+    return sorted(found)
+
+
+def _mirrored_range_write(nodes, label, swap=False, start=None, end=None):
+    """Mirror every keyed frame in the range. One undo step for the lot.
+
+    THE PLAYHEAD MOVES, and it has to. A mirror is computed from world
+    matrices, so the rig genuinely has to be evaluated at each frame -- the
+    timed-read trick that makes arc sampling cheap does not apply, because
+    there is no single plug to read. `scripts/arc_bench.py` measures what
+    scrubbing costs: it is proportional to the whole scene, so this is the
+    operation in this module most likely to feel slow on a heavy shot.
+
+    IT READS THE WHOLE RANGE, THEN WRITES IT. Two passes, for two reasons that
+    both produced wrong answers when it was one -- see the comments on pass 1.
+
+    THE PRECONDITIONS ARE CHECKED FOR EVERY FRAME BEFORE ANY OF THEM IS
+    WRITTEN. Refusing halfway would leave the range half mirrored, which is
+    worse than refusing at the start and much worse than not offering the
+    operation at all -- a half mirrored range looks finished.
+
+    An earlier version of this checked once and said in its own docstring that
+    the symmetry verdict "is a property of the REST pose, so it cannot change
+    between one frame and the next". THAT WAS WRONG, and a production shot
+    disproved it: `pairing.reflection_for` derives the mirror plane from the
+    rig root, so a character that travels through a shot is only on that plane
+    for part of it. The same rig measured 1047 units out of symmetry at one
+    frame and perfectly symmetric at another.
+
+    Stranded controls are still keyed once rather than per frame -- that one
+    really is a property of the control and not of the time.
+
+    IT WRITES THE WHOLE MIRRORED POSE AT EVERY FRAME IT VISITS, so a channel
+    keyed only at frame 1 comes back keyed at every frame in the set. That is
+    deliberate: a mirrored channel value is computed from the source's entire
+    transform, so writing only the channels that already had a key on that
+    frame would write values that disagree with the matrix they came from.
+    """
+    with undo.LazyChunk("animkit: {0}".format(label)) as chunk:
+        with cache.scope():
+            stranded = [n for n in nodes if xform.unkeyed_but_posed(n)]
+            if stranded:
+                chunk.open()
+                keyed = key_stranded(stranded)
+                if keyed:
+                    print(
+                        "animkit: keyed %d posed-but-unkeyed control(s) so they "
+                        "could be mirrored: %s"
+                        % (len(stranded), ", ".join(sorted(stranded)[:5]))
+                    )
+
+        # REFUSE BEFORE THE EXPENSIVE PART, NOT AFTER IT.
+        #
+        # Pass 1 scrubs the whole range to capture poses, and on a heavy shot
+        # that is seconds of the animator's Maya locked up. Measured on a real
+        # scene: mirroring eight props that have no counterparts spent 3.3
+        # seconds finding out there was nothing to mirror, and flipping them
+        # twice spent 6.8. Pairing is a question about the REST POSE -- it does
+        # not depend on time and needs no frames at all -- so it is answered
+        # first, and the answer costs nothing.
+        with cache.scope():
+            try:
+                symmetry = pairing.analyse(nodes)
+            except Exception:
+                symmetry = None
+        if symmetry is not None and not symmetry.pairs:
+            cmds.warning(
+                "animkit: none of the %d selected control(s) has a counterpart "
+                "to %s onto, so there is nothing to do: %s"
+                % (len(nodes), label.split()[0],
+                   ", ".join(n.split("|")[-1] for n in nodes[:5]))
+            )
+            return 0
+
+        frames = keyed_frames(nodes, start=start, end=end)
+        if not frames:
+            cmds.warning(
+                "animkit: nothing to %s -- the selected controls have no keys%s"
+                % (label.split()[0],
+                   "" if start is None and end is None else " in that range")
+            )
+            return 0
+
+        restore = curves.current_time()
+
+        # PASS 1 -- READ THE WHOLE RANGE BEFORE WRITING ANY OF IT.
+        #
+        # Two separate bugs live in doing this a frame at a time, and the first
+        # draft of this function had both.
+        #
+        # The pose read at frame 9 has to be the pose the ANIMATOR made, not
+        # the one this operation left behind at frame 1 -- read lazily, a
+        # mirror feeds its own output back into its own input.
+        #
+        # And the mirror's DIRECTION is decided by asking the scene which side
+        # is posed, which stops being answerable the moment the other side has
+        # been written. Frame 1 mirrored correctly; every frame after it found
+        # both sides posed, reported the pair as ambiguous and skipped it. The
+        # symptom was a range mirror that silently only did its first frame.
+        captured = {}
+        posed = set()
+        refusal = None
+        try:
+            for frame in frames:
+                cmds.currentTime(frame)
+                captured[frame] = capture(nodes)
+                for node in nodes:
+                    if _is_posed(node):
+                        posed.add(node)
+
+                # SYMMETRY IS CHECKED HERE, AT EVERY FRAME, and that is not
+                # belt and braces.
+                #
+                # It was measured on a production shot: the verdict CHANGES
+                # frame to frame. `reflection_for` takes the mirror plane from
+                # the rig root, and a character that travels through the shot
+                # is only on that plane for part of it -- 1047 units off at one
+                # frame, symmetric at another. An earlier version of this
+                # checked once, at whatever time the scene happened to be
+                # sitting at, and then refused halfway through writing.
+                #
+                # Checking inside this pass costs no extra scrubbing, because
+                # the playhead is already here.
+                if refusal is None:
+                    try:
+                        verdict = pairing.analyse(nodes)
+                        if not verdict.ok:
+                            refusal = (frame, verdict.describe())
+                    except Exception:
+                        log.debug("animkit: symmetry check failed at %s",
+                                  frame, exc_info=True)
+        finally:
+            cmds.currentTime(restore)
+
+        if refusal is not None:
+            frame, why = refusal
+            cmds.warning(
+                "animkit: cannot %s -- the rig is not symmetric at rest at "
+                "frame %s, so a mirror there would produce a pose whose "
+                "silhouette reads and whose limb is wrong. %s"
+                % (label.split()[0], frame, why)
+            )
+            return 0
+
+        if not any(captured.values()):
+            cmds.warning("animkit: nothing selected to %s" % label.split()[0])
+            return 0
+
+        # A flip exchanges both sides, so every selected control is a source. A
+        # mirror has a direction, and it is settled ONCE for the whole range: a
+        # control posed on ANY frame in the range drives its counterpart on all
+        # of them. Deciding per frame would hand a control that passes through
+        # rest mid-shot a different answer in the middle than at the ends.
+        if swap:
+            sources = list(nodes)
+        else:
+            sources = [node for node in nodes if node in posed] or list(nodes)
+
+        # NO SEPARATE DRY RUN. There used to be one here and it was worse
+        # than useless: it mirrored the pose captured at frames[0] while the
+        # SCENE was still sitting at the restore time, and `mirror_pose` reads
+        # the scene for its symmetry verdict -- so it validated one state and
+        # then wrote in another. On a shot where the character travels, it
+        # passed at the parked frame and refused partway through the range.
+        # The loop above checks every frame it is actually going to write.
+
+        # PASS 2 -- write. The playhead still moves, because apply() keys at
+        # the current time, but nothing is READ from the scene here.
+        written = 0
+        try:
+            for frame in frames:
+                snapshot = captured[frame]
+                if not snapshot:
+                    continue
+
+                # THE CHUNK OPENS BEFORE THE TIME CHANGE, not after it.
+                #
+                # A currentTime is undoable like anything else. Opened after
+                # the first one, the chunk does not contain it, and the
+                # animator gets an operation that takes TWO presses of Ctrl+Z
+                # to undo -- measured on a production shot, where a 405-write
+                # mirror needed two. House rule 3 is one operation, one undo
+                # step, and a time change counts.
+                #
+                # Still lazy: a range whose every snapshot is empty never
+                # reaches this line and leaves the undo queue alone.
+                chunk.open()
+                cmds.currentTime(frame)
+                try:
+                    mirrored = mirror_pose(snapshot, nodes=sources, swap=swap)
+                except MirrorRefused as exc:
+                    # Unreachable now that every frame is checked up front,
+                    # unless the scene changed underneath us. Stop rather than
+                    # carry on producing a half-mirrored range.
+                    cmds.warning(
+                        "animkit: %s stopped at frame %s: %s"
+                        % (label, frame, exc)
+                    )
+                    break
+                written += apply(mirrored, label=label)
+        finally:
+            cmds.currentTime(restore)
+
+        if written:
+            print("animkit: %s across %d keyed frame(s), %d channel write(s)"
+                  % (label, len(frames), written))
+        return written
+
+
+def mirror_range(start=None, end=None):
+    """Mirror the selected controls onto their counterparts, over time.
+
+    The range defaults to every frame that carries a key on the selection, so
+    "mirror this arm" means the whole of its animation rather than whichever
+    frame the playhead happened to be parked on.
+    """
+    from animkit.core import selection
+
+    nodes = selection.selected_nodes()
+    if not nodes:
+        cmds.warning("animkit: nothing selected to mirror")
+        return 0
+    return _mirrored_range_write(
+        nodes, "mirror range", start=start, end=end
+    )
+
+
+def flip_range(start=None, end=None):
+    """Swap the selected controls' animation with their counterparts', over time."""
+    from animkit.core import selection
+
+    nodes = selection.selected_nodes()
+    if not nodes:
+        cmds.warning("animkit: nothing selected to flip")
+        return 0
+    return _mirrored_range_write(
+        nodes, "flip range", swap=True, start=start, end=end
+    )
+
+
 def capture_rest_pose(nodes=None, force=False):
     """Declare the CURRENT pose to be the rig's rest pose.
 
@@ -774,6 +1038,18 @@ def capture_rest_pose(nodes=None, force=False):
     So an asymmetric capture is rolled back rather than kept. force=True keeps
     it anyway, for a rig that really is asymmetric at rest and where mirroring
     is not the point.
+
+    THE CHECK IS DELIBERATELY NOT SMART ABOUT CONTROL BOARDS. A facial picker's
+    `_L` and `_R` widgets are squares on a flat panel, spaced by layout, so they
+    fail the reflection test by the same distance forever -- measured on one
+    production rig at 24.219 for every pair on the board. That single board is
+    enough to block a capture for the whole character.
+
+    It would be easy to exclude them and wrong to do it automatically: a board
+    pair 24 units out and an arm somebody moved 24 units are the same
+    measurement, and quietly accepting the second is exactly the failure this
+    function exists to prevent. So the refusal names them and hands the
+    animator `force=True`, which is explicit intent rather than a guess.
     """
     from animkit.core import selection
 
@@ -811,10 +1087,17 @@ def capture_rest_pose(nodes=None, force=False):
         for node, matrix in previous.items():
             xform.set_rest_override(node, matrix)
         cmds.warning(
-            "animkit: NOT captured -- the rig is not symmetric in this pose, so "
-            "it cannot be a rest pose (%d pair(s) off, e.g. %s). Put the rig on "
-            "its bind/default pose and try again. Most rigs need no rest "
-            "capture at all."
+            "animkit: NOT captured -- the rig is not symmetric in this pose, "
+            "so it cannot be a rest pose (%d pair(s) off, e.g. %s). Put the "
+            "rig on its bind/default pose and try again; most rigs need no "
+            "rest capture at all. IF THOSE ARE PICKER OR FACE-BOARD CONTROLS "
+            "they will never pass this check -- a board's widgets are laid out "
+            "by spacing rather than by anatomy, so its left and right halves "
+            "are not reflections of each other and no pose will make them one. "
+            "Nothing here can tell that apart from a genuinely broken rig, "
+            "which is why it refuses rather than guessing. Select only the "
+            "controls you want a rest for, or call capture_rest_pose("
+            "force=True) once you have read the list above and recognise it."
             % (len(symmetry.broken), symmetry.describe(limit=3))
         )
         return 0
@@ -1494,6 +1777,14 @@ OPERATIONS = (
     Operation("animkitPoseFlip", "Flip",
               "Swap the pose of the selected controls with their counterparts",
               flip_selected, group="Pose"),
+    Operation("animkitPoseMirrorRange", "Mirror Anim",
+              "Mirror the selected controls onto their counterparts on every "
+              "frame they are keyed on, not just this one",
+              mirror_range, group="Pose"),
+    Operation("animkitPoseFlipRange", "Flip Anim",
+              "Swap the selected controls' animation with their counterparts' "
+              "on every frame they are keyed on",
+              flip_range, group="Pose"),
     Operation("animkitPoseCaptureRest", "Set Rest",
               "Declare the current pose to be this rig's rest pose. Only needed "
               "for a rig whose controls do not zero to their defaults -- put the "

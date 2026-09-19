@@ -28,7 +28,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 
 if (-not $Maya) {
     Write-Host "Fast tier (no Maya)" -ForegroundColor Cyan
-    & python -m pytest "$repo\tests\test_blend.py" "$repo\tests\test_settings.py" "$repo\tests\test_radial_geom.py" "$repo\tests\test_media.py" "$repo\tests\test_transcode.py" -q
+    & python -m pytest "$repo\tests\test_blend.py" "$repo\tests\test_settings.py" "$repo\tests\test_radial_geom.py" "$repo\tests\test_media.py" "$repo\tests\test_transcode.py" "$repo\tests\test_catalogue.py" "$repo\tests\test_usage.py" "$repo\tests\test_install.py" -q
     exit $LASTEXITCODE
 }
 

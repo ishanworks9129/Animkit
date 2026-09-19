@@ -16,6 +16,8 @@ claims to call, and the failure shows up as a broken hotkey in someone else's
 Maya rather than as anything visible here.
 """
 
+from animkit.core import usage
+
 
 class Operation(object):
     """One user-facing operation.
@@ -40,9 +42,35 @@ class Operation(object):
         self.destructive = destructive
 
     def invoke(self, **overrides):
+        """Call the operation, and record that it was called.
+
+        This is the ONE place a click becomes a call -- the panel, the strip
+        and the radial all arrive here -- which is what makes usage logging a
+        four-line change rather than fifty-five of them.
+
+        A hotkey does NOT come through here. `command` below builds a string
+        that Maya calls straight into the module, so a build handed to testers
+        under-reports anything they put on a key. That is a known gap and a
+        deliberate one: routing runTimeCommands through a logging shim would
+        change the command string animators read in the Hotkey Editor and on
+        the Help page, and an honest command string is worth more than a
+        complete count.
+
+        The record is taken AFTER the call and never in place of it. A failure
+        to log is not a failure to operate.
+        """
         call = dict(self.kwargs)
         call.update(overrides)
-        return self.fn(**call)
+        try:
+            result = self.fn(**call)
+        except Exception as exc:
+            # The half worth having: which operation broke, on a real rig, in
+            # somebody else's Maya. Re-raised untouched -- the UI still has to
+            # show the animator what went wrong.
+            usage.record(self.name, error=exc)
+            raise
+        usage.record(self.name, result=result)
+        return result
 
     @property
     def command(self):

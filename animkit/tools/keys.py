@@ -272,6 +272,214 @@ def snap_to_frame(**kwargs):
     return _apply("snap keys to frame", run, **kwargs)
 
 
+# --- resampling -------------------------------------------------------------
+
+
+#: step -> (what animators call it, how to describe the frames it keeps).
+#:
+#: ONE PLACE. The panel, the runTimeCommand registration and the parametrised
+#: test harness all read OPERATIONS, which is generated from this -- so the set
+#: of bake steps lives here and cannot drift from any of them. Same reason
+#: sets.MAX_SLOTS generates its recall operations rather than listing them.
+BAKE_LABELS = {
+    1: ("ones", "every frame"),
+    2: ("twos", "every 2nd frame"),
+    3: ("threes", "every 3rd frame"),
+    4: ("fours", "every 4th frame"),
+    5: ("fives", "every 5th frame"),
+    6: ("sixes", "every 6th frame"),
+    7: ("sevens", "every 7th frame"),
+}
+
+#: The steps themselves, derived so there is nothing to keep in sync.
+BAKE_STEPS = tuple(sorted(BAKE_LABELS))
+
+
+def _sample_frames(start, end, step):
+    """Whole steps from `start`, always finishing exactly on `end`.
+
+    The end frame is kept even when it is off the step grid, because it carries
+    the last pose of the range and dropping it moves the end of the shot. That
+    makes the final interval shorter than `step`, which reads as an off-by-one
+    in a key count and is not one.
+
+    Frames are computed as start + i * step rather than accumulated, so a long
+    range cannot drift off whole frames one rounding error at a time.
+    """
+    frames = []
+    index = 0
+    while True:
+        frame = start + index * step
+        if frame >= end - 1e-9:
+            break
+        frames.append(float(frame))
+        index += 1
+    frames.append(float(end))
+    return frames
+
+
+def _bake_span(resolved, curve_name, entries):
+    """The range to resample on one curve, or None when there is nothing to do.
+
+    THE TWO TARGET MODES MEAN DIFFERENT THINGS HERE and cannot share an answer.
+    In selected-key mode the animator has said which keys they mean, so their
+    extent is the range. In current-time mode there is exactly one entry per
+    curve and it says nothing about a range at all -- so the curve's own first
+    and last key is the only honest reading, and it is also what somebody who
+    pressed Bake without selecting any keys meant by it.
+    """
+    if resolved.mode == targets_mod.TARGET_KEYS:
+        times = [e.time for e in entries if e.time is not None]
+        if len(times) < 2:
+            return None
+        return min(times), max(times)
+
+    found = cmds.keyframe(curve_name, q=True, timeChange=True) or []
+    if len(found) < 2:
+        return None
+    low, high = min(found), max(found)
+
+    # CLAMPED TO THE PLAYBACK RANGE, and this is not a nicety.
+    #
+    # A curve's own extent is not the range an animator means. Measured on a
+    # real shot: a prop whose timeline read 0-120 carried curves running to
+    # frame 560, and baking on twos over the curve extent turned 81 keys into
+    # 2,529 -- a thirty-fold explosion, most of it past the end of the
+    # timeline, from an operation whose whole reputation is for thinning keys
+    # out. The overlap of the two is the honest answer: never outside the
+    # animation that exists, and never outside the range being worked in.
+    try:
+        limit_low = float(cmds.playbackOptions(q=True, min=True))
+        limit_high = float(cmds.playbackOptions(q=True, max=True))
+    except Exception:
+        log.debug("animkit: no playback range to clamp to", exc_info=True)
+        return low, high
+
+    low, high = max(low, limit_low), min(high, limit_high)
+    if high - low < 1e-9:
+        return None
+    return low, high
+
+
+def _stray_keys(curve_name, start, end, kept):
+    """Key times inside [start, end] that the bake did not sample.
+
+    Matched with a tolerance rather than by equality. A key that has been
+    dragged lands on 1.0000001700680272 often enough that _move_keys carries a
+    comment about it, and an exact comparison would leave every one of those
+    behind as unbaked debris sitting a millionth of a frame off the grid.
+    """
+    found = cmds.keyframe(curve_name, q=True, timeChange=True) or []
+    strays = []
+    for when in found:
+        if when < start - 1e-6 or when > end + 1e-6:
+            continue
+        if any(abs(when - keep) <= 1e-6 for keep in kept):
+            continue
+        strays.append(when)
+    return strays
+
+
+def bake_every(step=2, **kwargs):
+    """Resample the target curves onto every `step`th frame.
+
+    Bake on twos, threes and so on. Each sampled frame keeps the value the
+    curve already had there and everything between the sampled frames is
+    dropped, so what the animation is worth at the frames it keeps is unchanged
+    by construction. That is the invariant the tests assert, and it is the only
+    one worth asserting -- the shape between those frames is what a resample
+    exists to replace.
+
+    READ THROUGH THE CURVE, NOT getAttr. `cmds.keyframe(..., eval=True)` asks
+    the animCurve what it is worth at a time. getAttr asks the DG, which is
+    stale after any topology change and is answering about the flattened layer
+    stack rather than the curve being written. House rule 2, on a read path.
+
+    TANGENTS BECOME AUTO, and are stated rather than left to Maya's default
+    tangent preference. That preference is a per-user setting, so a bake that
+    inherited it would produce different curves on two animators' machines from
+    the same input.
+    """
+    step = int(step)
+    if step < 1:
+        cmds.warning("animkit: bake step must be 1 or more, got %r" % (step,))
+        return 0
+
+    def run(resolved):
+        grouped = {}
+        for entry in resolved.entries:
+            grouped.setdefault(entry.curve_name, []).append(entry)
+
+        written = 0
+        for curve_name, entries in grouped.items():
+            span = _bake_span(resolved, curve_name, entries)
+            if span is None:
+                continue
+            start, end = span
+            frames = _sample_frames(start, end, step)
+            if len(frames) < 2:
+                continue
+
+            # SAMPLE THE WHOLE RANGE BEFORE WRITING ANY OF IT. The samples come
+            # off the curve that is about to be replaced, so a read interleaved
+            # with the writes would be asking a curve that is half original and
+            # half baked -- and every sample after the first write would be the
+            # wrong answer, in a way that still produces a plausible curve.
+            sampled = []
+            for frame in frames:
+                try:
+                    found = cmds.keyframe(
+                        curve_name, q=True, eval=True, time=(frame, frame)
+                    )
+                except Exception:
+                    log.exception(
+                        "animkit: could not sample %s at %s", curve_name, frame
+                    )
+                    found = None
+                if found:
+                    sampled.append((frame, found[0]))
+
+            if len(sampled) < 2:
+                continue
+
+            # WRITE THE SAMPLES FIRST, THEN REMOVE THE STRAYS. Never the
+            # other way round.
+            #
+            # Clearing the range first empties the curve, and MAYA DELETES AN
+            # ANIMCURVE NODE WHEN ITS LAST KEY GOES -- so the very next
+            # setKeyframe failed with "No object matches name" on a node that
+            # had existed one line earlier. The same disappearing-curve trap
+            # targets.dirty() guards against. Writing first means the curve is
+            # never empty and there is nothing to resurrect.
+            for frame, value in sampled:
+                try:
+                    cmds.setKeyframe(
+                        curve_name, time=frame, value=value,
+                        inTangentType="auto", outTangentType="auto",
+                    )
+                    written += 1
+                except Exception:
+                    log.exception(
+                        "animkit: could not bake %s at %s", curve_name, frame
+                    )
+
+            kept = [frame for frame, _value in sampled]
+            for stray in _stray_keys(curve_name, start, end, kept):
+                try:
+                    cmds.cutKey(curve_name, time=(stray, stray), clear=True)
+                except Exception:
+                    log.exception(
+                        "animkit: could not drop %s at %s", curve_name, stray
+                    )
+        return written
+
+    if step in BAKE_LABELS:
+        label = "bake on %s" % BAKE_LABELS[step][0]
+    else:
+        label = "bake every %d frames" % step
+    return _apply(label, run, **kwargs)
+
+
 # --- shape operations -------------------------------------------------------
 
 
@@ -412,6 +620,28 @@ def delete(**kwargs):
 Operation = registry.Operation
 
 
+def _bake_operations():
+    """One Operation per entry in BAKE_LABELS.
+
+    Generated rather than listed, so a step cannot exist without a button and a
+    runTimeCommand to reach it, and the harness covers each one the moment it
+    appears. The label is just the number -- the icon carries "bake" and seven
+    hand-drawn numerals would read as seven smudges at 16px.
+    """
+    made = []
+    for step in BAKE_STEPS:
+        word, frames = BAKE_LABELS[step]
+        made.append(Operation(
+            "animkitKeysBake%d" % step,
+            "%d" % step,
+            "Bake on %s: resample the target curves onto %s" % (word, frames),
+            bake_every,
+            {"step": step},
+            group="Bake",
+        ))
+    return tuple(made)
+
+
 OPERATIONS = (
     Operation("animkitKeysOffsetBack", "-1", "Move the target keys one frame earlier",
               offset, {"frames": -1}, group="Timing"),
@@ -426,6 +656,7 @@ OPERATIONS = (
     Operation("animkitKeysSnapToFrame", "Snap",
               "Round the target keys onto whole frames",
               snap_to_frame, group="Timing"),
+) + _bake_operations() + (
 
     Operation("animkitKeysTangentAuto", "Auto", "Auto tangents",
               set_tangents, {"preset": "auto"}, group="Tangents"),

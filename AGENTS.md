@@ -23,7 +23,7 @@ that surprised us once is now pinned by a test with a comment saying why.
 | Tests | **pytest**, run under `mayapy` | Not bundled with Maya; `scripts/run_tests.ps1` installs it `--user` on first run. |
 | Shell | **PowerShell** on Windows | `scripts/run_tests.ps1`. A Bash tool is also available in this environment. |
 | Runtime deps | **no Python packages**; one optional bundled binary | Stdlib + Maya only: `contextlib`, `functools`, `hashlib`, `json`, `logging`, `math`, `os`, `re`, `subprocess`, `time`, `traceback`. Do not add a third-party Python dependency — a studio install is a `.mod` file and a folder, and it has to stay that way. The exception is [animkit/vendor/ffmpeg/](animkit/vendor/ffmpeg/): a separate program run over a subprocess, optional at runtime, bundled because Maya cannot decode `.mp4` or `.mov` on an image plane. It is still just a folder. |
-| Packaging | **`.mod` file**, pure Python | [modules/animkit.mod](modules/animkit.mod). No compiled extension anywhere, which is what keeps one build serving every Maya version. |
+| Packaging | **`.mod` file**, pure Python | [modules/animkit.mod](modules/animkit.mod). No compiled extension anywhere, which is what keeps one build serving every Maya version. [DRAG_AND_DROP_INSTALL.py](DRAG_AND_DROP_INSTALL.py) writes that `.mod` for a tester; [startup/userSetup.py](startup/userSetup.py) is what calls `startup()` at launch; [scripts/make_release.ps1](scripts/make_release.ps1) builds the hand-off zip and refuses to ship a personal path, a stray `.pyc` or the GPL ffmpeg binary. |
 | VCS | **none — this is not a git repo** | Do not run `git` commands expecting history. There is no baseline to diff against; the test suite is the safety net. |
 
 The package is called `animkit`, **not** `animbot`, so it can be installed
@@ -52,6 +52,7 @@ started.
 | `cache.py` | Scoped memoization. Read its docstring before extending it. |
 | `undo.py` | `undo_chunk`, `LazyChunk`, refresh suspension, panic button. |
 | `settings.py` | JSON prefs that cannot break Maya launch. |
+| `usage.py` | Local usage log for a build handed to testers. Operation names and counts only -- no node names, no paths, no scene names, and a failure records its exception CLASS not its message. Never touches the network. No Maya and no Qt, so it tests in plain CPython. |
 | `scene.py` | `MSceneMessage` callbacks → cache invalidation. |
 | `media.py` | What a dropped path is: an image, a movie, a sound, or one frame of a sequence. No Maya and no Qt, so it tests in plain CPython. |
 | `transcode.py` | Video → image sequence and sound → wav via the bundled ffmpeg, cached. No Maya and no Qt either — it runs real conversions in the fast tier. |
@@ -62,18 +63,21 @@ started.
 |---|---|
 | `blend.py` | Blend maths. Imports nothing from Maya, so it tests in plain CPython. |
 | `tween.py` | `TweenSession` — snapshot / update / commit for the drag. |
-| `keys.py` | **15** keyframe operations, in groups `Timing, Tangents, Cycle, Edit`. |
-| `pose.py` | **8** pose operations: copy/paste/mirror/flip/reset/rest capture. Also `rig_controls()` and `controls_in()` — which nodes are controls. |
+| `keys.py` | **22** keyframe operations, in groups `Timing, Bake, Tangents, Cycle, Edit`. The seven Bake entries are GENERATED from `BAKE_LABELS`, so the set of steps lives in one place. |
+| `pose.py` | **10** pose operations: copy/paste/mirror/flip/reset/rest capture, plus mirror and flip across a frame range. Also `rig_controls()` and `controls_in()` — which nodes are controls. |
 | `sets.py` | **7** selection-set operations. Named sets stored on the rig as tagged `objectSet`s. |
-| `reference.py` | **10** reference-media operations. Image planes made from a dropped video or image sequence, tagged so no other image plane in the shot is ever touched. Free by default — a real transform you can move, rotate and scale. |
+| `reference.py` | **11** reference-media operations. Image planes made from a dropped video or image sequence, tagged so no other image plane in the shot is ever touched. Free by default — a real transform you can move, rotate and scale. |
 | `audio.py` | **5** sound operations. An `audio` node on the time slider made from a dropped mp3/wav, tagged so no other audio node in the shot is touched. Maya reads wav and aiff only, so anything else is converted first. |
-| `registry.py` | The one `Operation` class every registry shares. |
+| `registry.py` | The one `Operation` class every registry shares. `invoke()` is the single funnel for the panel, strip and radial -- which is why the usage hook is four lines there rather than fifty-five elsewhere. A hotkey does NOT pass through it. |
 
 ### UI (`animkit/ui/`)
 
 | Module | What it is |
 |---|---|
 | `panel.py` | **The front door.** One dockable panel, five tabs. |
+| `strip.py` | The horizontal bar docked against the time slider. Same operations, one row. Maya's time slider is itself a `workspaceControl`, which is what lets this dock beside it instead of reaching into Maya's own layout. |
+| `help_ui.py` | "What can animkit do" — generated from the registries, showing each operation, what it is for, its `runTimeCommand` name, and the key it is on **right now**. |
+| `catalogue.py` | How the strip and the help page arrange the registries. **No Qt, no Maya** — which is why it is the only part of either that has tests. |
 | `style.py` | Palette, metrics, stylesheet. The only place a colour is defined. |
 | `icons.py` | 37 vector icons, drawn in code. No image files ship. |
 | `mayawin.py` | `workspaceControl` plumbing. Every trap here cost a day. |
@@ -89,9 +93,9 @@ started.
 
 - `animkit.startup()` — idempotent, called from `userSetup.py`, does no UI work.
 - `animkit.ui.panel.show()` — the panel an animator opens. `animkitShow`.
-- `animkit.commands` — registers **63** `runTimeCommand`s under
+- `animkit.commands` — registers **74** `runTimeCommand`s under
   *Custom Scripts → animkit*. Binds **no hotkeys**.
-- `animkit.selftest.run()` — **33** checks against nodes it creates and deletes,
+- `animkit.selftest.run()` — **34** checks against nodes it creates and deletes,
   plus a viewport-drop check that is a measurement headless and a gate in a
   real Maya.
 - `scripts/rig_probe.py` — read-only diagnosis of why a mirror is not working.
@@ -117,7 +121,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_tests.ps1 -Maya -MayaVers
 import animkit.selftest as st; st.run()
 ```
 
-**Current baseline: 134 fast, and 754 under `-Maya`, and 33/33 self-test,
+**Current baseline: 149 fast, and 903 under `-Maya`, and 34/34 self-test,
 identical across two consecutive runs.**
 
 The suite runs against the SHIPPED settings defaults — `conftest.isolated_prefs`
@@ -128,9 +132,12 @@ nothing about attachment. If your change moves those numbers
 down, that is the finding — report it, do not paper over it.
 
 Note what `-Maya` actually runs: `pytest tests/`, so it collects **both** tiers
-— 542 Maya-only plus the 131 fast ones. The line above used to read "128 fast +
-659 Maya tier", which was two different countings added together and matched no
-command; 673 is what the runner prints.
+— the Maya-only tests plus the fast ones, in one number. Do not add the two
+figures in the baseline together: 842 ALREADY INCLUDES the 134, so the sum is a
+number that matches no command anyone can run. This note has been wrong twice
+for exactly that reason ("128 fast + 659 Maya tier", then "542 Maya-only plus
+the 131 fast ones" alongside a headline of 678), which is why it now says what
+the runner prints and nothing else: `run_tests.ps1 -Maya` prints 842.
 
 Run the self-test **twice**. If run 2 differs from run 1, cleanup is leaking
 state and the two runs exercised different code paths.
@@ -399,6 +406,30 @@ the README. The ones most likely to bite a new change:
   invisibly until somebody tries to match a contact. Read the rate from
   `MTime`, not by mapping the `currentUnit` string — that string is an open
   set (`film`, `ntsc`, `ntscf`, `23.976fps`, ...) and a lookup table goes stale.
+- **The mirror plane is NOT always the rig root's YZ.** `xform.mirror_plane`
+  reads it off the root's rest matrix, which is right whenever the root
+  TRANSFORM carries the placement -- and wrong on a rig that bakes the
+  placement into where its joints were built, leaving an identity group on
+  top. Measured on a production rig: root at the origin, character at x=-520
+  rotated twelve degrees, every left/right pair a thousand units from where
+  the root's plane said. `pairing._plane_for_root` now tries the root first
+  and fits the plane from the control pairs when the root's pairs almost
+  nothing.
+- **A derived rest pose cannot see through a constraint.**
+  `xform.rest_world_matrix` composes rest LOCAL matrices up the DAG, so a posed
+  ancestor is correctly zeroed -- but a CONSTRAINED ancestor's local matrix is
+  written by its constraint, so its rest is wherever the constraint currently
+  puts it. Measured: an arm hanging off `FKParentConstraintToScapula_R` had its
+  rest position drift up to 6 units between frames, and failed the symmetry
+  check by 8-11 against a tolerance of 0.76. A captured rest pose
+  (`xform._rest_overrides`) short-circuits the whole chain and is the answer
+  for those rigs.
+- **A facial control board can never pass a symmetry check.** Its `_L`/`_R`
+  widgets are squares on a flat panel laid out by spacing -- 24.219 apart on
+  every pair, on one measured rig -- so they are not reflections of each other
+  and no pose makes them so. One board blocks `capture_rest_pose` for the whole
+  character. It is deliberately not auto-excluded: a board pair 24 units out
+  and an arm somebody moved 24 units are the same measurement.
 - **A QApplication created after `maya.standalone.initialize()` is a fatal
   crash, not an exception** — mayapy dies and writes a crash-recovery `.ma`.
   Creating one *before* initialize works and would make widgets testable

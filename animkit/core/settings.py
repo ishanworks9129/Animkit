@@ -132,6 +132,19 @@ DEFAULTS = {
     #: ships with animkit, else whatever is on PATH". For a studio that has
     #: standardised on its own build.
     "reference.ffmpeg": "",
+    #: Append each operation to a local log -- see animkit.core.usage.
+    #:
+    #: On, and on deliberately, because the log NEVER LEAVES THE MACHINE. It
+    #: is a file in this prefs folder; getting it back to whoever shipped the
+    #: build is a person exporting a zip and choosing to send it. There is no
+    #: network client anywhere in animkit for it to leak through.
+    #:
+    #: It records operation names, counts and the Maya version. It records no
+    #: node name, no file path and no scene name -- usage.py explains why that
+    #: is not a detail. The Help page states all of this next to the button
+    #: that turns it off, because a log somebody has to go looking for the
+    #: existence of is not one they consented to.
+    "usage.log": True,
 }
 
 _cache = None

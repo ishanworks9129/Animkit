@@ -1,7 +1,7 @@
 # animkit
 
 Animation tooling for Autodesk Maya. Layer-aware data layer, Qt 5/6 shim, a
-tween/blend slider, fifteen keyframe operations behind one shared target
+tween/blend slider, twenty-two keyframe operations behind one shared target
 resolver, pose copy/paste/mirror/flip that works on any rig with no
 configuration, named selection sets stored on the rig, and a held-hotkey radial
 to reach any of it without looking.
@@ -51,7 +51,7 @@ import animkit.selftest as st
 st.run()
 ```
 
-33 checks against temporary nodes it creates and deletes itself. It does not
+34 checks against temporary nodes it creates and deletes itself. It does not
 open a new scene and does not touch any node you did not select; your
 selection, current time and animation-layer selection are restored on exit.
 Prints a PASS/FAIL table, plus `TIME` rows that report milliseconds instead of
@@ -70,9 +70,9 @@ are testing different code paths. That is exactly how the
 Verified on **Maya 2024 / PySide2**: 33/33, identical across two consecutive
 runs.
 
-Four of those thirty-three exist because a `runTimeCommand` body is a *string*
+Four of those thirty-four exist because a `runTimeCommand` body is a *string*
 that nothing compiles until an animator presses the key: the self-test compiles
-all 57, checks that every radial wedge still resolves to a real operation, and
+all 72, checks that every radial wedge still resolves to a real operation, and
 presses the radial's release command with nothing open — which is what happens
 whenever somebody binds it on its own by mistake.
 
@@ -90,13 +90,72 @@ animkit.reload_all()   # close the panel first
 
 ## Install properly
 
-Edit the path in [modules/animkit.mod](modules/animkit.mod), drop it in
-`%USERPROFILE%\Documents\maya\modules\`, and append
-[userSetup_example.py](userSetup_example.py) to your `userSetup.py`.
+**Drag [DRAG_AND_DROP_INSTALL.py](DRAG_AND_DROP_INSTALL.py) into a Maya
+viewport.** It writes one `.mod` into `<maya prefs>/modules/`, adds an
+`animkit` shelf, and calls `startup()` in the running session, so there is
+nothing to restart. Drop it in again to uninstall. It points Maya at the
+folder it is sitting in rather than copying anything, so put the folder
+somewhere permanent first — and it warns you if that looks like Downloads.
+
+By hand, if you would rather: edit the path in
+[modules/animkit.mod](modules/animkit.mod) and drop it in
+`%USERPROFILE%\Documents\maya\modules\`. Startup comes from
+[startup/userSetup.py](startup/userSetup.py), which the `.mod` reaches through
+`MAYA_SCRIPT_PATH` — that folder holds one file on purpose, because pointing
+at `scripts/` instead would put `bench.py` on every animator's import path.
+Studios that drive startup from a managed `userSetup.py` should delete that
+line and use [userSetup_example.py](userSetup_example.py) instead.
+
+To hand a build to someone outside the repo, run
+[scripts/make_release.ps1](scripts/make_release.ps1). It stages only what a
+tester needs, refuses to zip a package with a personal path or a stray `.pyc`
+in it, and leaves the GPL ffmpeg binary out unless you ask for it.
 
 For a studio, put the repo on a network share and put one `.mod` in a path on
 `MAYA_MODULE_PATH`. That is the entire deployment story for a pure-Python
 tool — no installer, no licence server, `git pull` to update.
+
+## Finding out what testers actually used
+
+Two mechanisms, and neither one is a server.
+
+**Per-recipient builds.** `make_release.ps1 -Recipient "studio-x"` rewrites
+[animkit/_build.py](animkit/_build.py) in the staged copy, so the zip carries
+a build id and a recipient name. A usage log that comes back can be matched to
+the handover it came from, and so can a copy that turns up somewhere it was
+not sent. This needs nothing running on anybody's machine, which is what makes
+it the cheapest tracking available and the first one to reach for.
+
+**A local usage log.** [animkit/core/usage.py](animkit/core/usage.py) appends
+an operation name and a count to a JSONL file beside `settings.json`. A shelf
+button and the Help page both export it as a zip the tester can read before
+deciding to send it.
+
+Three decisions in there are worth keeping:
+
+**It stays local, and that is the feature.** The strongest sentence in the
+tester README is that a TD can grep the whole codebase and find no HTTP client
+— which is exactly the sentence a telemetry endpoint would cost. It is also
+the practical answer: a studio box is firewalled, and a blocking HTTP call
+from a panel button is a Maya hang with your name on it. Collection is a
+person exporting a zip and choosing to send it.
+
+**It records nothing about the rig.** No node names, no attribute names, no
+file paths, no scene names. A tester is usually working on somebody else's
+show under somebody else's NDA, and a log full of `char_hero_L_arm_IK_ctrl`
+names an unannounced production. This is why a failed operation records
+`RuntimeError` and never the message — the message is where the names live,
+and `tests/test_usage.py` asserts a rig name put into an exception does not
+reach the file.
+
+**The hook goes in `Operation.invoke()`, and so it misses hotkeys.** Every
+click from the panel, the strip and the radial funnels through that one
+method, which is what makes 55 operations a four-line change. A
+`runTimeCommand` does not: `Operation.command` builds a string that calls
+straight into the module. Closing that gap means routing every hotkey through
+a logging shim, which changes the command string animators read in the Hotkey
+Editor and on the Help page. An honest command string is worth more than a
+complete count, so the gap is documented rather than closed.
 
 ---
 
@@ -109,6 +168,7 @@ tool — no installer, no licence server, `git pull` to update.
 | [animkit/core/targets.py](animkit/core/targets.py) | "Which keys am I acting on." Shared by the tween and every keyframe op. |
 | [animkit/core/cache.py](animkit/core/cache.py) | Scoped memoization. Read the docstring before extending it. |
 | [animkit/core/settings.py](animkit/core/settings.py) | JSON prefs that cannot break Maya launch. |
+| [animkit/core/usage.py](animkit/core/usage.py) | Local usage log for a tester build. Operation names and counts, never a node name. No network, no Maya, no Qt. |
 | [animkit/core/xform.py](animkit/core/xform.py) | Matrix layer: rest poses, reflection, frame relations, decomposition. |
 | [animkit/core/pairing.py](animkit/core/pairing.py) | Finds a control's counterpart, and `analyse()` — the one symmetry verdict. |
 | [animkit/core/rest_store.py](animkit/core/rest_store.py) | Persists a captured rest pose in the scene, by connection not by name. |
@@ -274,6 +334,128 @@ Graph Editor and plays back wrong. (`option="insert"` and `"segmentOver"` refuse
 the move outright, which is no better.) `keys._move_keys` now clears the
 destination frame first, then re-resolves indices *after* those deletions,
 because deleting a key renumbers every key after it.
+
+### The mirror plane, and when the root does not know it
+
+`xform.mirror_plane` takes the plane from the rig root's rest matrix. The
+reasoning is sound -- a rig built at x=500, or rotated, is still symmetric
+about *itself* -- and it holds on every rig whose root transform carries the
+placement.
+
+It does not hold on a rig that bakes the placement into where its joints and
+controls were *built*. Measured on a production character: `Group`,
+`MotionSystem` and `FKSystem` all at the origin, the character standing at
+x=-520, z=790, rotated about twelve degrees. The plane came out as the world
+YZ, every left/right pair landed a thousand units from where it should, and the
+mirror refused on a rig that is perfectly symmetric.
+
+`pairing._plane_for_root` handles it now. **The root is tried first and kept
+whenever it works** -- it is correct on most rigs, costs one matrix read, and
+changing the answer underneath rigs that already mirror correctly would be a
+poor trade. Only when the root's plane pairs almost nothing does
+`pairing.fit_plane` ask the controls instead: every left/right pair implies
+exactly one plane, their perpendicular bisector, and on a symmetric rig they
+all imply the same one. On that rig its eight facial controls agreed to three
+decimal places.
+
+It **votes rather than averages**, because the outliers are not noise. A
+control board's widgets are laid out by spacing and a posed limb is not at
+rest; averaging those in would drag the plane off the answer the majority
+already agree on. Below four supporting pairs it declines and keeps the root's
+plane -- two pairs agreeing could be a pair of props either side of a
+character.
+
+### What a derived rest cannot see
+
+`rest_world_matrix` walks to the top of the DAG composing rest *local*
+matrices, so an ancestor that is itself a posed control does not contaminate
+the answer. A **constrained** ancestor does: its local matrix is written by the
+constraint, so its rest is wherever the constraint currently puts it.
+
+Measured on the same rig, whose arm hangs off `FKParentConstraintToScapula_R`
+with further point constraints at the elbow and wrist offsets:
+
+| Control | rest x @ f0 | rest x @ f30 | drift | mirror error | tolerance |
+|---|---|---|---|---|---|
+| FKShoulder_R | -519.183 | -516.451 | 3.028 | 3.833 | 0.785 |
+| FKElbow_R | -503.616 | -505.244 | 1.628 | 8.166 | 0.772 |
+| FKWrist_R | -486.124 | -491.897 | 5.989 | 11.595 | 0.757 |
+
+The rest pose moves with the animation, which is not something a rest pose is
+allowed to do. `capture_rest_pose` is the answer for these rigs and not a
+nicety: a captured rest goes into `xform._rest_overrides`, which
+`rest_world_matrix` short-circuits on, so the constraint chain is never walked.
+
+### Bake to Ns
+
+Seven operations, `Bake 1` through `Bake 7`, generated from one `BAKE_LABELS`
+constant so a step cannot exist without a button and a `runTimeCommand` to
+reach it. The parametrised harness covers all seven the moment they appear,
+which is the whole reason for generating them rather than listing them.
+
+The invariant is narrow and deliberate: **at every frame a bake keeps, the
+animation is worth what it was worth before.** Nothing is promised about the
+shape between those frames, because replacing that shape is what a resample
+*is*. The range is the selected keys' extent when the animator picked keys in
+the Graph Editor, and the curve's own first-to-last key otherwise — the two
+target modes genuinely mean different things here and cannot share an answer.
+
+Three things that look like details and are not:
+
+- **The end frame is kept even when it is off the step grid.** Baking 1–11 on
+  fours lands on 1, 5, 9 and then 11. The last interval is shorter than the
+  step, which reads as an off-by-one in a key count; dropping it instead would
+  move the end of the shot.
+- **Samples are read before anything is written.** They come off the curve that
+  is about to be replaced, so a read interleaved with the writes would be
+  asking a curve that is half original and half baked — and it would still
+  produce a plausible-looking result.
+- **The samples are written first and the strays removed afterwards, not the
+  other way round.** Clearing the range first empties the curve, and Maya
+  deletes an animCurve node when its last key goes: the next `setKeyframe`
+  then failed with *No object matches name* on a node that existed one line
+  earlier. Same disappearing-curve trap `targets.dirty()` guards against.
+
+Tangents become `auto`, stated explicitly rather than inherited from Maya's
+default tangent preference — that preference is a per-user setting, so a bake
+that took it would give two animators different curves from the same input.
+
+### Mirror and flip across a range
+
+`mirror_range` and `flip_range` do what Mirror and Flip do, on every frame the
+selection is keyed on rather than on the one the playhead is parked on. They
+reuse `pairing.analyse` and the existing mirror maths unchanged; what is new is
+which frames get visited and in what order the reading and writing happen.
+
+**Only frames that already carry keys.** An empty frame is a question nothing
+in the scene can answer, and inventing an answer for it is house rule 7's
+territory — the same ambiguity that let Reset collapse a facial control board.
+
+**It reads the whole range, then writes it.** Two passes, for two reasons that
+each produced a wrong answer when it was one:
+
+- The pose read at frame 9 has to be the pose the *animator* made, not the one
+  this operation left behind at frame 1. Read lazily, a mirror feeds its own
+  output back into its own input.
+- The mirror's direction is decided by asking the scene which side is posed,
+  and that stops being answerable the moment the other side has been written.
+  Frame 1 mirrored correctly; every frame after it found both sides posed,
+  reported the pair as ambiguous, and skipped it. The symptom was a range
+  mirror that silently only did its first frame — and it looked like it had
+  worked, because the frame you were parked on was right.
+
+So the direction is settled once, for the whole range: a control posed on any
+frame in it drives its counterpart on all of them. The symmetry verdict is a
+property of the rest pose, so it cannot change frame to frame, and it is
+checked once, before anything is written — refusing halfway would leave a range
+that looks finished and is not.
+
+**The playhead moves, and it has to.** A mirror is computed from world
+matrices, so the rig genuinely has to be evaluated at each frame; there is no
+single plug to read, so the timed-read trick that makes arc sampling cheap does
+not apply. `scripts/arc_bench.py` measures what scrubbing costs — it is
+proportional to the whole scene — which makes this the operation in `tools.pose`
+most likely to feel slow on a heavy shot.
 
 ---
 
@@ -1078,7 +1260,7 @@ they bind what they want:
 | `animkitRadialPose` / `animkitRadialKeys` / `animkitRadialSets` | see below |
 | `animkitRadialRelease` | **never on its own** |
 
-57 commands in total. The keyframe, pose, selection-set and reference ones are
+72 commands in total. The keyframe, pose, selection-set and reference ones are
 generated from `keys.OPERATIONS`, `pose.OPERATIONS`, `sets.OPERATIONS` and
 `reference.OPERATIONS`, so they cannot drift out of sync with the panels, and
 each button's tooltip names its `runTimeCommand` so an animator can find it in

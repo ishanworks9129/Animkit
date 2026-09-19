@@ -56,6 +56,10 @@ TEXT_ON_ACCENT = "#ffffff"
 #: a glance separates into bands without needing to be read.
 ACCENTS = {
     "Timing": "#e0a458",
+    # Bake is a timing operation but it is not the Timing group, and amber next
+    # to amber makes two rows of buttons read as one. Olive is the nearest
+    # unused hue: away from Cycle's emerald and from Ref's orange.
+    "Bake": "#a8bf5c",
     "Tangents": "#5b9bd5",
     "Cycle": "#6bbf73",
     "Edit": "#c96565",
